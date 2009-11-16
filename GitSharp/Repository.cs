@@ -208,14 +208,23 @@ namespace GitSharp
             if (!DirExists(Path.Combine(path, "refs/tags")))
                 return false;
 
+            Repository repo = null;
+
             try
             {
                 // let's see if it loads without throwing an exception
-                new Repository(path);
+                repo = new Repository(path);
             }
             catch (Exception)
             {
                 return false;
+            }
+            finally
+            {
+                if (repo != null)
+                {
+                    repo.Dispose();
+                }
             }
             return true;
         }
@@ -228,6 +237,24 @@ namespace GitSharp
         private static bool FileExists(string path)
         {
             return new FileInfo(path).Exists;
+        }
+
+        /// <summary>
+        /// Check out the branch with the given name
+        /// </summary>
+        /// <param name="name"></param>
+        public void CheckoutBranch(string name)
+        {
+            CheckoutBranch(new Branch(this, name));
+        }
+
+        /// <summary>
+        /// Check out the given branch
+        /// </summary>
+        /// <param name="branch"></param>
+        public void CheckoutBranch(Branch branch)
+        {
+            Branch.SwitchTo(branch);
         }
 
         /// <summary>
@@ -282,7 +309,7 @@ namespace GitSharp
                 var internal_refs = _internal_repo._refDb.GetBranches();
                 var dict = new Dictionary<string, Branch>(internal_refs.Count);
                 foreach (var pair in internal_refs)
-                    dict[pair.Key] = new Branch(this, pair.Value);
+                    dict[pair.Key.TrimStart('/')] = new Branch(this, pair.Value);
                 return dict;
             }
         }

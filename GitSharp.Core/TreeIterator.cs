@@ -38,7 +38,6 @@
  */
 
 using System;
-using System.Collections.Generic;
 using System.IO;
 
 namespace GitSharp.Core
@@ -56,6 +55,7 @@ namespace GitSharp.Core
 		/// <summary>
 		/// Traversal order
 		/// </summary>
+		[Serializable]
 		public enum Order
 		{
 			/// <summary>
@@ -142,7 +142,7 @@ namespace GitSharp.Core
 
 		private bool Step()
 		{
-			if (_tree == null) return false; 
+			if (_tree == null) return false;
 			if (_sub != null)
 			{
 				if (_sub.Step()) return true;
@@ -178,16 +178,16 @@ namespace GitSharp.Core
 		}
 
 
-	    public bool hasNext()
-	    {
-	       return HasNextTreeEntry();
-	    }
+		public bool hasNext()
+		{
+			return HasNextTreeEntry();
+		}
 
-	    public TreeEntry next()
-	    {
-            TreeEntry ret = NextTreeEntry();
-            Step();
-            return ret;
-	    }
+		public TreeEntry next()
+		{
+			TreeEntry ret = NextTreeEntry();
+			Step();
+			return ret;
+		}
 	}
 }

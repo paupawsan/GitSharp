@@ -38,6 +38,7 @@
 using System;
 using System.IO;
 using GitSharp.Core.Exceptions;
+using GitSharp.Core.Util;
 
 namespace GitSharp.Core.Transport
 {
@@ -45,15 +46,17 @@ namespace GitSharp.Core.Transport
     {
         private readonly FileInfo _bundle;
 
-        public static bool CanHandle(URIish uri)
+        public static bool canHandle(URIish uri)
         {
+            if (uri == null)
+                throw new ArgumentNullException("uri");
             if (uri.Host != null || uri.Port > 0 || uri.User != null || uri.Pass != null || uri.Path == null)
                 return false;
 
             if ("file".Equals(uri.Scheme) || uri.Scheme == null)
             {
-                FileInfo file = resolve(new DirectoryInfo("."), uri.Path);
-                return file.Name.EndsWith(".bundle");
+                FileInfo f = PathUtil.CombineFilePath(new DirectoryInfo("."), uri.Path);
+                return f.IsFile() || f.Name.EndsWith(".bundle");
             }
 
             return false;
@@ -62,7 +65,7 @@ namespace GitSharp.Core.Transport
         public TransportBundleFile(Repository local, URIish uri)
             : base(local, uri)
         {
-            _bundle = resolve(new DirectoryInfo("."), uri.Path);
+            _bundle = PathUtil.CombineFilePath(new DirectoryInfo("."), uri.Path);
         }
 
         public override IFetchConnection openFetch()
@@ -87,16 +90,7 @@ namespace GitSharp.Core.Transport
 
         public override void close()
         {
-        }
-
-        private static FileInfo resolve(FileSystemInfo @base, string path)
-        {
-            FileInfo file = new FileInfo(path);
-            if (!file.Exists)
-            {
-                file = new FileInfo(Path.Combine(@base.FullName, path));
-            }
-            return file;
+            // Resources must be established per-connection.
         }
     }
 }

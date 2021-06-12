@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2008, Robin Rosenberg <robin.rosenberg@dewire.com>
  * Copyright (C) 2008, Shawn O. Pearce <spearce@spearce.org>
+ * Copyright (C) 2010, Henon <meinrad.recheis@gmail.com>
  *
  * All rights reserved.
  *
@@ -40,18 +41,40 @@ using System;
 using System.IO;
 using GitSharp.Core.Exceptions;
 using GitSharp.Core.Util;
-using ICSharpCode.SharpZipLib.Tar;
 
 namespace GitSharp.Core.Transport
 {
-
     public class PacketLineIn
     {
+        public static string END = string.Empty;
+
+        [Serializable]
         public enum AckNackResult
         {
+            /// <summary>
+            /// NAK
+            /// </summary>
             NAK,
+
+            /// <summary>
+            /// ACK
+            /// </summary>
             ACK,
-            ACK_CONTINUE
+
+            /// <summary>
+            /// ACK + continue
+            /// </summary>
+            ACK_CONTINUE,
+
+            /// <summary>
+            /// ACK + common
+            /// </summary>
+            ACK_COMMON,
+
+            /// <summary>
+            /// ACK + ready
+            /// </summary>
+            ACK_READY
         }
 
         private readonly Stream ins;
@@ -63,26 +86,27 @@ namespace GitSharp.Core.Transport
             lenbuffer = new byte[4];
         }
 
-        public Stream sideband(ProgressMonitor pm)
-        {
-            return new SideBandInputStream(this, ins, pm);
-        }
-
         public AckNackResult readACK(MutableObjectId returnedId)
         {
             string line = ReadString();
-            if (line.Length  == 0)
+            if (line.Length == 0)
                 throw new PackProtocolException("Expected ACK/NAK, found EOF");
             if ("NAK".Equals(line))
                 return AckNackResult.NAK;
             if (line.StartsWith("ACK "))
             {
                 returnedId.FromString(line.Slice(4, 44));
-                if (line.IndexOf("continue", 44) != -1)
-                {
+
+                if (line.Length == 44)
+                    return AckNackResult.ACK;
+
+                string arg = line.Substring(44);
+                if (arg.Equals(" continue"))
                     return AckNackResult.ACK_CONTINUE;
-                }
-                return AckNackResult.ACK;
+                else if (arg.Equals(" common"))
+                    return AckNackResult.ACK_COMMON;
+                else if (arg.Equals(" ready"))
+                    return AckNackResult.ACK_READY;
             }
             throw new PackProtocolException("Expected ACK/NAK, got: " + line);
         }
@@ -91,23 +115,16 @@ namespace GitSharp.Core.Transport
         {
             int len = ReadLength();
             if (len == 0)
-                return string.Empty;
+                return END;
 
             len -= 4; // length header (4 bytes)
-            
-            if (len <= 0)
+
+            if (len == 0)
                 return string.Empty;
 
             byte[] raw = new byte[len];
 
-            try
-            {
-                IO.ReadFully(ins, raw, 0, len);
-            }
-            catch (IOException e)
-            {
-                throw invalidHeader(lenbuffer, e);
-            }
+            IO.ReadFully(ins, raw, 0, len);
 
             if (raw[len - 1] == '\n')
                 len--;
@@ -118,36 +135,20 @@ namespace GitSharp.Core.Transport
         {
             int len = ReadLength();
             if (len == 0)
-                return string.Empty;
+                return END;
 
             len -= 4; // length header (4 bytes)
-            if (len == 0)
-                return string.Empty;
 
             byte[] raw = new byte[len];
 
-            try
-            {
-                IO.ReadFully(ins, raw, 0, len);
-            }
-            catch (IOException e)
-            {
-                throw invalidHeader(lenbuffer, e);
-            }
+            IO.ReadFully(ins, raw, 0, len);
 
             return RawParseUtils.decode(Constants.CHARSET, raw, 0, len);
         }
 
         public int ReadLength()
         {
-            try
-            {
-                IO.ReadFully(ins, lenbuffer, 0, 4);
-            }
-            catch (IOException e)
-            {
-                throw invalidHeader(lenbuffer, e);
-            }
+            IO.ReadFully(ins, lenbuffer, 0, 4);
 
             try
             {
@@ -158,14 +159,9 @@ namespace GitSharp.Core.Transport
             }
             catch (IndexOutOfRangeException e)
             {
-                throw invalidHeader(lenbuffer, e);
+                throw new IOException("Invalid packet line header: " + (char)lenbuffer[0] +
+                                      (char)lenbuffer[1] + (char)lenbuffer[2] + (char)lenbuffer[3], e);
             }
-        }
-
-        private static Exception invalidHeader(byte[] lenbuffer, Exception e)
-        {
-            return new IOException("Invalid packet line header: " + (char)lenbuffer[0] +
-                                                    (char)lenbuffer[1] + (char)lenbuffer[2] + (char)lenbuffer[3], e);
         }
     }
 

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2007, Dave Watson <dwatson@mimvista.com>
  * Copyright (C) 2008, Robin Rosenberg <robin.rosenberg@dewire.com>
  * Copyright (C) 2008, Kevin Thompson <kevin.thompson@theautomaters.com>
@@ -76,6 +76,7 @@ namespace GitSharp.Core
             Missing = new HashSet<string>();
             Modified = new HashSet<string>();
             Untracked = new HashSet<string>();
+            MergeConflict = new HashSet<string>();
         }
 
         /// <summary>
@@ -127,11 +128,20 @@ namespace GitSharp.Core
                                                             }
                                                         }
                                                     }
+
+                                                    if (indexEntry != null)
+                                                    {
+                                                        if (indexEntry.Stage != 0)
+                                                        {
+                                                            MergeConflict.Add(indexEntry.Name);
+                                                            _anyChanges = true;
+                                                        }
+                                                    }
                                                 }
                             };
             new IndexTreeWalker(_index, _tree, root, visitor).Walk();
 
-            CheckUntrackedDirectory(root.FullName, "");
+            CheckUntrackedDirectory(root.FullName, string.Empty);
 
             return _anyChanges;
         }
@@ -147,7 +157,7 @@ namespace GitSharp.Core
             foreach (string dir in dirs)
             {
                 var dirname = new DirectoryInfo(dir).Name;
-                if (dirname.StartsWith(".git"))
+                if (dirname.StartsWith(Constants.DOT_GIT_EXT))
                     continue;
 
                 CheckUntrackedDirectory(dir, (relative_path.Length == 0 ? dirname : relative_path + "/" + dirname));
@@ -190,5 +200,15 @@ namespace GitSharp.Core
 
 
         public HashSet<string> Untracked { get; private set; }
+
+        /// <summary>
+        /// List of files in index and have a merge conflict
+        /// </summary>
+        public HashSet<string> MergeConflict { get; private set; }
+
+        /// <summary>
+        /// Returns the number of files checked into the git repository
+        /// </summary>
+        public int IndexSize { get { return _index.Members.Count; } }
     }
 }

@@ -48,10 +48,23 @@ using Tamir.SharpSsh.jsch;
 
 namespace GitSharp.Core.Transport
 {
+    /// <summary>
+    /// Transport through an SSH tunnel.
+    /// <para/>
+    /// The SSH transport requires the remote side to have Git installed, as the
+    /// transport logs into the remote system and executes a Git helper program on
+    /// the remote side to read (or write) the remote repository's files.
+    /// <para/>
+    /// This transport does not support direct SCP style of copying files, as it
+    /// assumes there are Git specific smarts on the remote side to perform object
+    /// enumeration, save file modification and hook execution.
+    /// </summary>
     public class TransportGitSsh : SshTransport, IPackTransport, IDisposable
     {
         public static bool canHandle(URIish uri)
         {
+            if (uri == null)
+                throw new ArgumentNullException("uri");
             if (!uri.IsRemote)
             {
                 return false;
@@ -103,6 +116,12 @@ namespace GitSharp.Core.Transport
         {
             if (Regex.Matches(val, "^[a-zA-Z0-9._/-]*$").Count > 0)
             {
+                // If the string matches only generally safe characters
+                // that the shell is not going to evaluate specially we
+                // should leave the string unquoted. Not all systems
+                // actually run a shell and over-quoting confuses them
+                // when it comes to the command name.
+                //
                 cmd.Append(val);
             }
             else
@@ -124,35 +143,35 @@ namespace GitSharp.Core.Transport
             }
         }
 
+        private String commandFor(string exe)
+        {
+            string path = Uri.Path;
+            if (Uri.Scheme != null && Uri.Path.StartsWith("/~"))
+                path = (Uri.Path.Substring(1));
+
+            var cmd = new StringBuilder();
+            int gitspace = exe.IndexOf("git ");
+            if (gitspace >= 0)
+            {
+                SqMinimal(cmd, exe.Slice(0, gitspace + 3));
+                cmd.Append(' ');
+                SqMinimal(cmd, exe.Substring(gitspace + 4));
+            }
+            else
+                SqMinimal(cmd, exe);
+            cmd.Append(' ');
+            SqAlways(cmd, path);
+            return cmd.ToString();
+        }
+
         private ChannelExec Exec(string exe)
         {
             InitSession();
-
+            
             try
             {
                 var channel = (ChannelExec)Sock.openChannel("exec");
-                string path = Uri.Path;
-                if (Uri.Scheme != null && Uri.Path.StartsWith("/~"))
-                {
-                    path = (Uri.Path.Substring(1));
-                }
-
-                var cmd = new StringBuilder();
-                int gitspace = exe.IndexOf("git ");
-                if (gitspace >= 0)
-                {
-                    SqMinimal(cmd, exe.Slice(0, gitspace + 3));
-                    cmd.Append(' ');
-                    SqMinimal(cmd, exe.Substring(gitspace + 4));
-                }
-                else
-                {
-                    SqMinimal(cmd, exe);
-                }
-
-                cmd.Append(' ');
-                SqAlways(cmd, path);
-                channel.setCommand(cmd.ToString());
+                channel.setCommand(commandFor(exe));
                 _errStream = CreateErrorStream();
                 channel.setErrStream(_errStream);
                 channel.connect();
@@ -164,6 +183,23 @@ namespace GitSharp.Core.Transport
             }
         }
 
+        void checkExecFailure(int status, string exe)
+        {
+            if (status == 127)
+            {
+                String why = _errStream.ToString();
+                IOException cause = null;
+                if (why != null && why.Length > 0)
+                    cause = new IOException(why);
+                throw new TransportException(Uri, "cannot execute: "
+                        + commandFor(exe), cause);
+            }
+        }
+
+        /// <returns>
+        /// the error stream for the channel, the stream is used to detect
+        /// specific error reasons for exceptions.
+        /// </returns>
         private static Stream CreateErrorStream()
         {
             return new GitSshErrorStream();
@@ -203,6 +239,10 @@ namespace GitSharp.Core.Transport
 
             public override void Write(byte[] buffer, int offset, int count)
             {
+                //TODO: [nulltoken] Do we need this override ? Or is WriteByte sufficient ?
+                throw new NotImplementedException(); 
+
+                /*
                 for (int i = offset; i < count + offset; i++)
                 {
                     if (buffer[i] == '\n')
@@ -216,17 +256,39 @@ namespace GitSharp.Core.Transport
                     WriteByte(buffer[i]);
                 }
                 base.Write(buffer, offset, count);
+                */ 
+            }
+
+            public override void WriteByte(byte b)
+            {
+                if (b == '\r')
+                {
+                    return;
+                }
+
+                base.WriteByte(b);
+
+                if (b == '\n')
+                {
+                    _all.Append(ToArray());
+                    SetLength(0);
+                }
             }
 
             public override string ToString()
             {
-                return _all + "\n" + Constants.CHARSET.GetString(ToArray());
+                string r = _all.ToString();
+                while (r.EndsWith("\n"))
+                    r = r.Slice(0, r.Length - 1);
+                return r;
             }
         }
 
         private class SshFetchConnection : BasePackFetchConnection
         {
             private ChannelExec _channel;
+
+            private int _exitStatus;
 
             public SshFetchConnection(TransportGitSsh instance)
                 : base(instance)
@@ -236,7 +298,7 @@ namespace GitSharp.Core.Transport
                     _channel = instance.Exec(instance.OptionUploadPack);
 
                     if (_channel.isConnected())
-                        init(_channel.getOutputStream());
+                        init(_channel.getInputStream(), _channel.getOutputStream());
                     else
                         throw new TransportException(uri, instance._errStream.ToString());
                 }
@@ -257,6 +319,8 @@ namespace GitSharp.Core.Transport
                 }
                 catch (NoRemoteRepositoryException notFound)
                 {
+                    Close();
+                    instance.checkExecFailure(_exitStatus, instance.OptionUploadPack);
                     throw instance.cleanNotFound(notFound);
                 }
             }
@@ -269,6 +333,7 @@ namespace GitSharp.Core.Transport
 
                 try
                 {
+                    _exitStatus = _channel.getExitStatus();
                     if (_channel.isConnected())
                     {
                         _channel.disconnect();
@@ -285,6 +350,8 @@ namespace GitSharp.Core.Transport
         {
             private ChannelExec _channel;
 
+            private int _exitStatus;
+
             public SshPushConnection(TransportGitSsh instance)
                 : base(instance)
             {
@@ -294,7 +361,7 @@ namespace GitSharp.Core.Transport
 
                     if (_channel.isConnected())
                     {
-                        init(_channel.getOutputStream());
+                        init(_channel.getInputStream(), _channel.getOutputStream());
                     }
                     else
                     {
@@ -318,6 +385,8 @@ namespace GitSharp.Core.Transport
                 }
                 catch (NoRemoteRepositoryException notFound)
                 {
+                    Close();
+                    instance.checkExecFailure(_exitStatus, instance.OptionReceivePack);
                     throw instance.cleanNotFound(notFound);
                 }
             }
@@ -330,6 +399,8 @@ namespace GitSharp.Core.Transport
                 {
                     try
                     {
+                        _exitStatus = _channel.getExitStatus();
+
                         if (_channel.isConnected())
                         {
                             _channel.disconnect();
@@ -347,7 +418,11 @@ namespace GitSharp.Core.Transport
 
         public override void Dispose()
         {
-            _errStream.Dispose();
+            if (_errStream != null)
+            {
+                _errStream.Dispose();
+            }
+
             base.Dispose();
         }
     }

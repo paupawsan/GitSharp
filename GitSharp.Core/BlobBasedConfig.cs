@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2009, JetBrains s.r.o.
  *
  * All rights reserved.
@@ -64,17 +64,22 @@ namespace GitSharp.Core
 		///	<summary> * The constructor from object identifier
 		///	</summary>
 		///	<param name="base">the base configuration file </param>
-		///	<param name="r">the repository</param>
+		///	<param name="repo">the repository</param>
 		/// <param name="objectid">the object identifier</param>
 		/// <exception cref="IOException">
 		/// the blob cannot be read from the repository. </exception>
 		/// <exception cref="ConfigInvalidException">
 		/// the blob is not a valid configuration format.
 		/// </exception> 
-		public BlobBasedConfig(Config @base, Repository r, ObjectId objectid)
+		public BlobBasedConfig(Config @base, Repository repo, ObjectId objectid)
 			: base(@base)
 		{
-			ObjectLoader loader = r.OpenBlob(objectid);
+			if (repo == null)
+			{
+				throw new System.ArgumentNullException("repo");
+			}
+			
+			ObjectLoader loader = repo.OpenBlob(objectid);
 			if (loader == null)
 			{
 				throw new IOException("Blob not found: " + objectid);
@@ -100,6 +105,11 @@ namespace GitSharp.Core
 		public BlobBasedConfig(Config @base, Commit commit, string path)
 			: base(@base)
 		{
+			if (commit == null)
+			{
+				throw new System.ArgumentNullException("commit");
+			}
+			
 			ObjectId treeId = commit.TreeId;
 			Repository r = commit.Repository;
 			TreeWalk.TreeWalk tree = TreeWalk.TreeWalk.ForPath(r, path, treeId);

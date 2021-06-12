@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2009, Stefan Schake <caytchen@gmail.com>
  *
  * All rights reserved.
@@ -35,6 +35,7 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+using System;
 using System.IO;
 using GitSharp.Core.Transport;
 
@@ -43,6 +44,7 @@ namespace GitSharp.Core
 
     public class SubmoduleEntry
     {
+		[Serializable]
         public enum UpdateMethod
         {
             Checkout,
@@ -112,6 +114,9 @@ namespace GitSharp.Core
 
         public void AddEntry(SubmoduleEntry entry)
         {
+			if (entry == null)
+				throw new System.ArgumentNullException ("entry");
+			
             setString("submodule", entry.Name, "path", entry.Path);
             setString("submodule", entry.Name, "url", entry.Url.ToPrivateString());
             if (entry.Update != SubmoduleEntry.UpdateMethod.Checkout)

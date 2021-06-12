@@ -38,86 +38,94 @@
  */
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Security.Cryptography;
-using System.Text;
 using System.IO;
 
 namespace GitSharp.Core.Util
 {
-    public class MessageDigest : ICloneable, IDisposable
+    public abstract class MessageDigest : IDisposable
     {
-        private MemoryStream _stream;
+        public static MessageDigest getInstance(string algorithm)
+        {
+            switch (algorithm.ToLower())
+            {
+                case "sha-1":
+                    return new MessageDigest<SHA1Managed>();
+                case "md5":
+                    return new MessageDigest<MD5CryptoServiceProvider>();
+                default:
+                    throw new NotSupportedException(string.Format("The requested algorithm \"{0}\" is not supported.", algorithm));
+            }
+        }
+
+        public abstract byte[] Digest();
+        public abstract byte[] Digest(byte[] input);
+        public abstract void Reset();
+        public abstract void Update(byte input);
+        public abstract void Update(byte[] input);
+        public abstract void Update(byte[] input, int index, int count);
+        public abstract void Dispose();
+    }
+
+    public class MessageDigest<TAlgorithm> : MessageDigest where TAlgorithm : HashAlgorithm, new()
+    {
+        private CryptoStream _stream;
+        private TAlgorithm _hash;
 
         public MessageDigest()
         {
-            this.Reset();
+            Init();
         }
 
-        private MessageDigest(byte[] buffer)
+        private void Init()
         {
-            _stream = new MemoryStream(buffer, true);
+            _hash = new TAlgorithm();
+            _stream = new CryptoStream(Stream.Null, _hash, CryptoStreamMode.Write);
         }
 
-        #region ICloneable Members
-
-        public object Clone()
+        public override byte[] Digest()
         {
-            return new MessageDigest(this._stream.ToArray());
-        }
-
-        #endregion
-
-        public byte[] Digest()
-        {
-            var ret = new SHA1Managed().ComputeHash(_stream.ToArray());
+            _stream.FlushFinalBlock();
+            var ret = _hash.Hash;
             Reset();
             return ret;
         }
 
-        public byte[] Digest(byte[] input)
+        public override byte[] Digest(byte[] input)
         {
-            return new SHA1Managed().ComputeHash(input);
+            using (var me = new MessageDigest<TAlgorithm>())
+            {
+                me.Update(input);
+                return me.Digest();
+            }
         }
 
-        public void Reset()
+        public override void Reset()
         {
-            _stream = new MemoryStream();
+            Dispose();
+            Init();
         }
 
-        public void Update(byte input)
+        public override void Update(byte input)
         {
             _stream.WriteByte(input);
         }
 
-        public void Update(byte[] input)
+        public override void Update(byte[] input)
         {
             _stream.Write(input, 0, input.Length);
         }
 
-        public void Update(byte[] input, int index, int count)
+        public override void Update(byte[] input, int index, int count)
         {
             _stream.Write(input, index, count);
         }
 
-		public void Dispose ()
-		{
-			_stream.Dispose();
-		}
-		
-
-        //public static MessageDigest GetInstance(string algorithm)
-        //{
-        //    return new MessageDigest();
-        //    //switch (algorithm.ToLower())
-        //    //{
-        //    //    case "sha1":
-        //    //        return new MessageDigest(new SHA1CryptoServiceProvider());
-        //    //    default:
-        //    //        throw new NotSupportedException(string.Format("The requested algorithm \"{0}\" is not supported.", algorithm));
-        //    //        break;
-        //    //}
-        //}
+        public override void Dispose()
+        {
+            if (_stream != null)
+                _stream.Dispose();
+            _stream = null;
+        }
     }
 }

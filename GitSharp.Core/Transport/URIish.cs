@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2008, Robin Rosenberg <robin.rosenberg@dewire.com>
  * Copyright (C) 2008, Shawn O. Pearce <spearce@spearce.org>
+ * Copyright (C) 2009, Mykola Nikishov <mn@mn.com.ua>
  *
  * All rights reserved.
  *
@@ -37,6 +38,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using GitSharp.Core.Util;
@@ -57,7 +60,7 @@ namespace GitSharp.Core.Transport
 		private static readonly Regex ScpUri = new Regex("^(?:([^@]+?)@)?([^:]+?):(.+)$");
 
 		public string Scheme { get; private set; }
-		public string Path { get; private set; }
+		public string Path { get; protected set; }
 		public string User { get; private set; }
 		public string Pass { get; private set; }
 		public int Port { get; private set; }
@@ -69,6 +72,8 @@ namespace GitSharp.Core.Transport
 		/// <param name="u">The source URL to convert from.</param>
 		public URIish(Uri u)
 		{
+			if (u == null)
+				throw new ArgumentNullException ("u");
 			Scheme = u.Scheme;
 			Path = u.AbsolutePath;
 			Port = u.Port;
@@ -358,7 +363,79 @@ namespace GitSharp.Core.Transport
 			return r.ToString();
 		}
 
-        private SystemReader system()
+	    /// <summary>
+	    ///   Get the "humanish" part of the path. Some examples of a 'humanish' part for a full path:
+	    /// </summary>
+	    /// <example>
+	    ///   /path/to/repo.git -> repo
+	    /// </example>
+	    /// <example>
+	    ///   /path/to/repo.git/ -> repo
+	    /// </example>
+	    /// <example>
+	    ///   /path/to/repo/.git -> repo
+	    /// </example>
+	    /// <example>
+	    ///   /path/to/repo/ -> repo
+	    /// </example>
+	    /// <example>
+	    ///   /path//to -> an empty string
+	    /// </example>
+	    /// <returns>
+	    ///   the "humanish" part of the path. May be an empty string. Never null.</returns>
+	    public string getHumanishName()
+	    {
+	        if (string.IsNullOrEmpty(Path))
+	        {
+	            throw new InvalidOperationException("Path is either null or empty.");
+	        }
+
+	        string[] elements = Path.Split('/');
+	        if (elements.Length == 0)
+	        {
+	            throw new InvalidOperationException();
+	        }
+
+            // In order to match Java Split behavior (http://java.sun.com/j2se/1.4.2/docs/api/java/lang/String.html#split(java.lang.String)
+	        string[] elements2 = RemoveTrailingEmptyStringElements(elements);
+
+            if (elements2.Length == 0)
+            {
+                throw new InvalidOperationException();
+            }
+            
+            string result = elements2[elements2.Length - 1];
+            if (Constants.DOT_GIT.Equals(result))
+	        {
+	            result = elements2[elements2.Length - 2];
+	        }
+	        else if (result.EndsWith(Constants.DOT_GIT_EXT))
+	        {
+                result = result.Slice(0, result.Length - Constants.DOT_GIT_EXT.Length);
+	        }
+
+	        return result;
+	    }
+
+	    private static string[] RemoveTrailingEmptyStringElements(string[] elements)
+	    {
+	        var trimmedElements = new List<string>();
+
+	        for (int i = elements.Length - 1; i > -1; i--)
+	        {
+                if (elements[i] == string.Empty)
+	            {
+	                continue;
+	            }
+	        
+                trimmedElements.AddRange(elements.Take(i + 1));
+                break;
+            }
+
+	        return trimmedElements.ToArray();
+	    }
+
+	    private SystemReader system()
         {
             return SystemReader.getInstance();
         }

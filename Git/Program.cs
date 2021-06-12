@@ -1,7 +1,8 @@
-﻿/*
+/*
  * Copyright (C) 2006, Robin Rosenberg <robin.rosenberg@dewire.com>
  * Copyright (C) 2008, Shawn O. Pearce <spearce@spearce.org>
  * Copyright (C) 2009, Henon <meinrad.recheis@gmail.com>
+ * Copyrigth (C) 2010, Andrew Cooper <andymancooper@gmail.com>
  *
  * All rights reserved.
  *
@@ -40,6 +41,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.IO;
@@ -132,12 +134,13 @@ namespace GitSharp.CLI
 
                 CommandCatalog catalog = new CommandCatalog();
                 CommandRef subcommand = catalog.Get(argv[0]);
-                DirectoryInfo gitdir = null;
+                string gitdir = null;
 
                 if (subcommand != null)
                 {
                     TextBuiltin cmd = subcommand.Create();
                     List<String> args = argv.ToList();
+                    GitSharp.Repository repo = null;
 
                     try
                     {
@@ -147,7 +150,7 @@ namespace GitSharp.CLI
                             {
                                 if (args[x].Length > 10)
                                 {
-                                    gitdir = new DirectoryInfo(args[x].Substring(11));
+                                    gitdir = args[x].Substring(10);
                                     args.RemoveAt(x);
                                     break;
                                 }
@@ -156,17 +159,28 @@ namespace GitSharp.CLI
                     }
                     catch (ArgumentException)
                     {
-                        GitSharp.Commands.OutputStream.WriteLine("error: can't find git directory");
-                        GitSharp.Commands.OutputStream.Flush();
+                        if (Git.DefaultOutputStream != null)
+                        {
+                            Git.DefaultOutputStream.WriteLine("error: can't find git directory");
+                            Git.DefaultOutputStream.Flush();
+                        }
                         Exit(1);
                     }
 
                     if (cmd.RequiresRepository)
                     {
                         if (gitdir == null)
-                            gitdir = new DirectoryInfo(GitSharp.AbstractCommand.FindGitDirectory(gitdir.FullName, cmd.RequiresRecursive, false));
+                        {
+                            gitdir = Commands.AbstractCommand.FindGitDirectory(null, true, false);
+                            if (gitdir == null)
+                            {
+                                Console.Error.WriteLine("fatal: Not a git repository (or any of the parent directories): .git");
+                                Exit(0);
+                            }
+                        }
 
-                        cmd.Init(new GitSharp.Core.Repository(gitdir), gitdir);
+                        repo = new GitSharp.Repository(gitdir);
+                        cmd.Init(repo, gitdir);
                     }
                     else
                         cmd.Init(null, gitdir);
@@ -179,8 +193,11 @@ namespace GitSharp.CLI
                     }
                     finally
                     {
-                        if (GitSharp.Commands.OutputStream != null)
-                            GitSharp.Commands.OutputStream.Flush();
+                        if (Git.DefaultOutputStream != null)
+                            Git.DefaultOutputStream.Flush();
+
+                        if (repo != null)
+                            repo.Close();
                     }
                 }
                 else
@@ -198,7 +215,7 @@ namespace GitSharp.CLI
                 // no subcommand has been specified in the command line.
                 try
                 {
-                    arguments = options.Parse(argv);
+                    options.Parse(argv, out arguments);
                 }
                 catch (OptionException err)
                 {
@@ -294,7 +311,7 @@ namespace GitSharp.CLI
             {
                 foreach (CommandRef c in matches)
                 {
-                    Console.WriteLine("git: '"+s+"' is not a git command. See 'git --help'.");
+                    Console.WriteLine("git: '" + s + "' is not a git command. See 'git --help'.");
                     Console.WriteLine();
                     Console.WriteLine("Did you mean this?");
                     Console.Write("      ");
@@ -312,27 +329,16 @@ namespace GitSharp.CLI
             }
         }
 
-        private static DirectoryInfo findGitDir()
-        {
-
-
-            DirectoryInfo current = new DirectoryInfo(".");
-            while (current != null)
-            {
-                DirectoryInfo gitDir = new DirectoryInfo(current + ".git");
-                if (gitDir.Exists)
-                    return gitDir;
-                current = current.Parent;
-            }
-            return null;
-        }
-
         /// <summary>
         /// Wait for Enter key if in DEBUG mode
         /// </summary>
         /// <param name="exit_code"></param>
         static public void Exit(int exit_code)
         {
+            //Close the static global repository before exiting
+            if (Git.DefaultRepository != null)
+                Git.DefaultRepository.Close();
+
 #if DEBUG
             Console.WriteLine("\n\nrunning in DEBUG mode, press any key to exit.");
             Console.In.ReadLine();

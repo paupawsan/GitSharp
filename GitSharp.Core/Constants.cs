@@ -44,87 +44,29 @@ using System.Text;
 using System;
 using GitSharp.Core.Util;
 using GitSharp.Core.Exceptions;
+using GitSharp.Core.Util.JavaHelper;
 
 namespace GitSharp.Core
 {
     public static class Constants
     {
-        public const string V2_BUNDLE_SIGNATURE = "# v2 git bundle";
-
-        /// <summary>
-        ///   Special name for the "HEAD" symbolic ref
-        /// </summary>
-        public const string Head = "HEAD";
-
-        public const string Master = "master";
-
-        public static class ObjectTypes
-        {
-            /// <summary>
-            /// Text string that identifies an object as an annotated tag.
-            /// </summary>
-            /// <remarks>
-            /// Annotated tags store a pointer to any other object, and an additional
-            /// message. It is most commonly used to record a stable release of the
-            /// project.
-            /// </remarks>
-            public const string Tag = "tag";
-
-            /// <summary>
-            /// Text string that identifies an object as tree.
-            /// </summary>
-            /// <remarks>
-            /// Trees attach object ids (hashes) to names and file
-            /// modes. The normal use for a tree is to store a
-            /// version of a directory and its contents.
-            /// </remarks>
-            public const string Tree = "tree";
-
-            /// <summary>
-            /// Text string that identifies an object as a blob
-            /// </summary>
-            /// <remarks>
-            /// Blobs store whole file revisions. They are used
-            /// for any user file, as well as for symlinks. Blobs
-            /// form the bulk of any project's storage space.
-            /// </remarks>
-            public const string Blob = "blob";
-
-            /// <summary>
-            ///    Text string that identifies an object as a commit.
-            /// </summary>
-            /// <remarks>
-            /// Commits connect trees into a string of project
-            /// histories, where each commit is an assertion that
-            /// the best way to continue is to use this other tree
-            /// (set of files).
-            /// </remarks>
-            public const string Commit = "commit";
-
-            public static readonly byte[] EncodedCommit = new[] { (byte)'c', (byte)'o', (byte)'m', (byte)'m', (byte)'i', (byte)'t' };
-            public static readonly byte[] EncodedTree = new[] { (byte)'t', (byte)'r', (byte)'e', (byte)'e' };
-            public static readonly byte[] EncodedBlob = new[] { (byte)'b', (byte)'l', (byte)'o', (byte)'b' };
-            public static readonly byte[] EncodedTag = new[] { (byte)'t', (byte)'a', (byte)'g' };
-        }
-
-        public const string Refs = "refs/";
-        public const string RefsTags = Refs + "tags/";
-        public const string RefsHeads = Refs + "heads/";
-        public const string RefsRemotes = Refs + "remotes/";
-
-        public static readonly string[] RefSearchPaths = { string.Empty, Refs, RefsTags, RefsHeads, RefsRemotes };
-
-        /*
         /// <summary>
         /// Hash function used natively by Git for all objects.
         /// </summary>
-        private const string HASH_FUNCTION = "SHA-1"; // [henon] we don't use it anyway
-        */
+        private const string HASH_FUNCTION = "SHA-1";
 
         /// <summary>
-        /// Length of an object hash.
+        /// A Git object hash is 160 bits, i.e. 20 bytes.
+        /// <para>
+        /// Changing this assumption is not going to be as easy as changing this declaration.
+        /// </para>
         /// </summary>
         public const int OBJECT_ID_LENGTH = 20;
+
+        /// <summary>
+        /// A Git object can be expressed as a 40 character string of hexadecimal digits. <see cref="OBJECT_ID_LENGTH"/>
+        /// </summary>
+        public const int OBJECT_ID_STRING_LENGTH = OBJECT_ID_LENGTH * 2;
 
         /// <summary>
         /// Special name for the "HEAD" symbolic-ref.
@@ -163,12 +105,12 @@ namespace GitSharp.Core
         /// message. It is most commonly used to record a stable release of the
         /// project.
         /// </summary>
-        public static string TYPE_TAG = "tag";
+        public const string TYPE_TAG = "tag";
 
-        private static readonly byte[] EncodedTypeCommit = encodeASCII(TYPE_COMMIT);
-        private static readonly byte[] EncodedTypeBlob = encodeASCII(TYPE_BLOB);
-        private static readonly byte[] EncodedTypeTree = encodeASCII(TYPE_TREE);
-        private static readonly byte[] EncodedTypeTag = encodeASCII(TYPE_TAG);
+        public static readonly byte[] EncodedTypeCommit = encodeASCII(TYPE_COMMIT);
+        public static readonly byte[] EncodedTypeBlob = encodeASCII(TYPE_BLOB);
+        public static readonly byte[] EncodedTypeTree = encodeASCII(TYPE_TREE);
+        public static readonly byte[] EncodedTypeTag = encodeASCII(TYPE_TAG);
 
         /// <summary>
         /// An unknown or invalid object type code.
@@ -339,6 +281,36 @@ namespace GitSharp.Core
         public const string GIT_COMMITTER_EMAIL_KEY = "GIT_COMMITTER_EMAIL";
 
         /// <summary>
+        /// The environment variable that limits how close to the root of the file systems JGit will traverse when looking for a repository root.
+        /// </summary>
+        public const string GIT_CEILING_DIRECTORIES_KEY = "GIT_CEILING_DIRECTORIES";
+
+        /// <summary>
+        /// The environment variable that tells us which directory is the ".git" directory
+        /// </summary>
+        public const string GIT_DIR_KEY = "GIT_DIR";
+
+        /// <summary>
+        /// The environment variable that tells us which directory is the working directory.
+        /// </summary>
+        public const string GIT_WORK_TREE_KEY = "GIT_WORK_TREE";
+
+        /// <summary>
+        /// The environment variable that tells us which file holds the Git index.
+        /// </summary>
+        public const string GIT_INDEX_KEY = "GIT_INDEX";
+
+        /// <summary>
+        /// The environment variable that tells us where objects are stored
+        /// </summary>
+        public const string GIT_OBJECT_DIRECTORY_KEY = "GIT_OBJECT_DIRECTORY";
+
+        /// <summary>
+        /// The environment variable that tells us where to look for objects, besides the default objects directory.
+        /// </summary>
+        public const string GIT_ALTERNATE_OBJECT_DIRECTORIES_KEY = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+
+        /// <summary>
         /// Default value for the user name if no other information is available
         /// </summary>
         public const string UNKNOWN_USER_DEFAULT = "unknown-user";
@@ -349,10 +321,24 @@ namespace GitSharp.Core
         public const string SIGNED_OFF_BY_TAG = "Signed-off-by: ";
 
         /// <summary>
+        /// Default remote name used by clone, push and fetch operations
+        /// </summary>
+        public const string DEFAULT_REMOTE_NAME = "origin";
+
+        /// <summary>
+        /// Default name for the Git repository directory
+        /// </summary>
+        public const string DOT_GIT = ".git";
+
+        /// <summary>
+        /// A bare repository typically ends with this string
+        /// </summary>
+        public const string DOT_GIT_EXT = ".git";
+
+        /// <summary>
         /// A gitignore file name
         /// </summary>
         public const string GITIGNORE_FILENAME = ".gitignore";
-
 
         /// <summary>
         /// Create a new digest function for objects.
@@ -360,13 +346,7 @@ namespace GitSharp.Core
         /// <returns>A new digest object.</returns>
         public static MessageDigest newMessageDigest()
         {
-            //try {
-            //    return MessageDigest.getInstance(HASH_FUNCTION);
-            //} catch (NoSuchAlgorithmException nsae) {
-            //    throw new RuntimeException("Required hash function "
-            //            + HASH_FUNCTION + " not available.", nsae);
-            //}
-            return new MessageDigest();
+            return MessageDigest.getInstance(HASH_FUNCTION);
         }
 
         /// <summary>

@@ -42,24 +42,44 @@ using System.Text;
 
 namespace GitSharp
 {
-    public class Author
-    {
-        public Author() { }
-        public Author(string name, string email)
-        {
-            Name = name;
-            EmailAddress = email;
-        }
+	/// <summary>
+	/// Represents the Author or Committer of a Commit.
+	/// </summary>
+	public class Author
+	{
 
-        public string Name { get; set; }
-        public string EmailAddress { get; set; }
+		/// <summary>
+		/// Creates an uninitialized Author. You may use the object initializer syntax with this constructor, i.e. new Author { Name="henon", EmailAddress="henon@gitsharp.com" }
+		/// </summary>
+		public Author() { }
 
-        public static Author Anonymous
-        {
-            get
-            {
-                return new Author("anonymous", "anonymous@void");
-            }
-        }
-    }
+		/// <summary>
+		/// Creates an Author.
+		/// </summary>
+		public Author(string name, string email)
+		{
+			Name = name;
+			EmailAddress = email;
+		}
+
+		public string Name { get; set; }
+
+		public string EmailAddress { get; set; }
+
+		/// <summary>
+		/// Preconfigured anonymous Author, which may be used by GitSharp if no Author has been configured.
+		/// </summary>
+		public static Author Anonymous
+		{
+			get
+			{
+				return new Author("anonymous", "anonymous@(none).com");
+			}
+		}
+
+		public static Author GetDefaultAuthor(Repository repo)
+		{
+			return new Author(repo.Config["user.name"], repo.Config["user.email"]);
+		}
+	}
 }

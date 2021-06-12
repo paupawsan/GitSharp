@@ -1,5 +1,5 @@
-﻿/*
- * Copyright (C) 2009, Henon <meinrad.recheis@gmail.com>
+/*
+ * Copyright (C) 2009-2010, Henon <meinrad.recheis@gmail.com>
  *
  * All rights reserved.
  *
@@ -39,7 +39,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-
+using GitSharp.Core;
 using ObjectId = GitSharp.Core.ObjectId;
 using CoreRef = GitSharp.Core.Ref;
 using CoreCommit = GitSharp.Core.Commit;
@@ -49,136 +49,182 @@ using FileTreeEntry = GitSharp.Core.FileTreeEntry;
 namespace GitSharp
 {
 
-    /// <summary>
-    /// Represents a directory in the git repository.
-    /// </summary>
-    public class Tree : AbstractObject, ITreeNode
-    {
-        internal Tree(Repository repo, ObjectId id) : base(repo, id) { }
+	/// <summary>
+	/// Represents a directory in the git repository.
+	/// </summary>
+	public class Tree : AbstractTreeNode
+	{
+		internal Tree(Repository repo, ObjectId id) : base(repo, id) { }
 
-        internal Tree(Repository repo, CoreTree tree)
-            : base(repo, tree.Id)
-        {
-            _internal_tree = tree;
-        }
+		internal Tree(Repository repo, CoreTree tree)
+			: base(repo, tree.Id)
+		{
+			_internal_tree = tree;
+		}
 
-        private CoreTree _internal_tree;
+		private CoreTree _internal_tree;
 
-        internal CoreTree InternalTree
-        {
-            get
-            {
-                if (_internal_tree == null)
-                    try
-                    {
-                        _internal_tree = _repo._internal_repo.MapTree(_id);
-                    }
-                    catch (Exception)
-                    {
-                        // the commit object is invalid. however, we can not allow exceptions here because they would not be expected.
-                    }
-                return _internal_tree;
-            }
-        }
+		internal CoreTree InternalTree
+		{
+			get
+			{
+				if (_internal_tree == null)
+					try
+					{
+						_internal_tree = _repo._internal_repo.MapTree(_id);
+					}
+					catch (Exception)
+					{
+						// the commit object is invalid. however, we can not allow exceptions here because they would not be expected.
+					}
+				return _internal_tree;
+			}
+		}
 
-        public string Name
-        {
-            get
-            {
-                if (InternalTree == null)
-                    return null;
-                return InternalTree.Name;
-            }
-        }
+		public override string Name
+		{
+			get
+			{
+				if (InternalTree == null)
+					return null;
+				if (InternalTree.IsRoot)
+					return "";
+				return InternalTree.Name;
+			}
+		}
 
-        /// <summary>
-        /// True if the tree has no parent.
-        /// </summary>
-        public bool IsRoot
-        {
-            get
-            {
-                if (InternalTree == null)
-                    return true;
-                return InternalTree.IsRoot;
-            }
-        }
+		/// <summary>
+		/// True if the tree has no parent.
+		/// </summary>
+		public bool IsRoot
+		{
+			get
+			{
+				if (InternalTree == null)
+					return true;
+				return InternalTree.IsRoot;
+			}
+		}
 
-        public Tree Parent
-        {
-            get
-            {
-                if (InternalTree == null)
-                    return null;
-                return new Tree(_repo, InternalTree.Parent);
-            }
-        }
+		public override Tree Parent
+		{
+			get
+			{
+				if (InternalTree == null)
+					return null;
+				if (InternalTree.Parent == null)
+					return null;
+				return new Tree(_repo, InternalTree.Parent);
+			}
+		}
 
-        /// <summary>
-        /// Entries of the tree. These are either Tree or Leaf objects representing sub-directories or files.
-        /// </summary>
-        public IEnumerable<AbstractObject> Children
-        {
-            get
-            {
-                if (InternalTree == null)
-                    return new Leaf[0];
-                return InternalTree.Members.Select(tree_entry =>
-                {
-                    if (tree_entry is FileTreeEntry)
-                        return new Leaf(_repo, tree_entry as FileTreeEntry) as AbstractObject;
-                    else
-                        return new Tree(_repo, tree_entry as CoreTree) as AbstractObject; // <--- is this always correct? we'll see :P
-                }).ToArray();
-            }
-        }
+		/// <summary>
+		/// Entries of the tree. These are either Tree or Leaf objects representing sub-directories or files.
+		/// </summary>
+		public IEnumerable<AbstractObject> Children
+		{
+			get
+			{
+				if (InternalTree == null)
+					return new Leaf[0];
 
-        /// <summary>
-        /// Tree entries representing this directory's subdirectories
-        /// </summary>
-        public IEnumerable<Tree> Trees
-        {
-            get
-            {
-                return Children.Where(child => child.IsTree).Cast<Tree>().ToArray();
-            }
-        }
+				// no GitLink support in JGit, so just skip them here to not cause problems
+				return InternalTree.Members.Where(te => !(te is GitLinkTreeEntry)).Select(
+					 tree_entry =>
+					 {
+						 if (tree_entry is FileTreeEntry)
+							 return new Leaf(_repo, tree_entry as FileTreeEntry) as AbstractObject;
 
-        /// <summary>
-        /// Leaf entries representing this directory's files
-        /// </summary>
-        public IEnumerable<Leaf> Leaves
-        {
-            get
-            {
-                return Children.Where(child => child.IsBlob).Cast<Leaf>().ToArray();
-            }
-        }
+						 return new Tree(_repo, tree_entry as CoreTree) as AbstractObject;
+					 }).ToArray();
+			}
+		}
 
-        public string Path
-        {
-            get
-            {
-                if (InternalTree == null)
-                    return null;
-                return InternalTree.FullName;
-            }
-        }
+		/// <summary>
+		/// Tree entries representing this directory's subdirectories
+		/// </summary>
+		public IEnumerable<Tree> Trees
+		{
+			get
+			{
+				return Children.Where(child => child.IsTree).Cast<Tree>().ToArray();
+			}
+		}
 
-        public int Permissions
-        {
+		/// <summary>
+		/// Leaf entries representing this directory's files
+		/// </summary>
+		public IEnumerable<Leaf> Leaves
+		{
+			get
+			{
+				return Children.Where(child => child.IsBlob).Cast<Leaf>().ToArray();
+			}
+		}
 
-            get
-            {
-                if (InternalTree == null)
-                    return 0;
-                return InternalTree.Mode.Bits;
-            }
-        }
+		public override string Path
+		{
+			get
+			{
+				if (InternalTree == null)
+					return null;
+				if (InternalTree.IsRoot)
+					return "";
+				return InternalTree.FullName;
+			}
+		}
 
-        public override string ToString()
-        {
-            return "Tree[" + ShortHash + "]";
-        }
-    }
+		public override int Permissions
+		{
+
+			get
+			{
+				if (InternalTree == null)
+					return 0;
+				return InternalTree.Mode.Bits;
+			}
+		}
+
+		public override string ToString()
+		{
+			return "Tree[" + ShortHash + "]";
+		}
+
+		/// <summary>
+		/// Find a Blob or Tree by traversing the tree along the given path. You can access not only direct children
+		/// of the tree but any descendant of this tree.
+		/// <para/>
+		/// The path's directory seperators may be both forward or backslash, it is converted automatically to the internal representation.
+		/// <para/>
+		/// Throws IOException.
+		/// </summary>
+		/// <param name="path">Relative path to a file or directory in the git tree. For directories a trailing slash is allowed</param>
+		/// <returns>A tree or blob object representing the referenced object</returns>
+		public AbstractObject this[string path]
+		{
+			get
+			{
+				if (path == "")
+					return this;
+				var tree_entry = _internal_tree.FindBlobMember(path);
+				if (tree_entry == null)
+					tree_entry = _internal_tree.findTreeMember(path);
+				if (tree_entry == null)
+					return null;
+				if (tree_entry.IsTree)
+					return new Tree(_repo, tree_entry as CoreTree);
+				else if (tree_entry.IsBlob)
+					return new Leaf(_repo, tree_entry as FileTreeEntry);
+				else // if (tree_entry.IsCommit || tree_entry.IsTag)
+					return AbstractObject.Wrap(_repo, tree_entry.Id);
+			}
+		}
+
+		public static implicit operator CoreTree(Tree t)
+		{
+			return t != null ? t._internal_tree : null;
+		}
+
+
+	}
 }

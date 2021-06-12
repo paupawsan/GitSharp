@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2008, Google Inc.
+ * Copyright (C) 2010, Henon <meinrad.recheis@gmail.com>
  *
  * All rights reserved.
  *
@@ -41,429 +42,601 @@ using System.IO;
 using GitSharp.Core.Exceptions;
 using GitSharp.Core.RevWalk;
 using GitSharp.Core.Util;
+using GitSharp.Core.Util.JavaHelper;
 
 namespace GitSharp.Core.Transport
 {
-	public class UploadPack : IDisposable
-	{
-		private const string OptionIncludeTag = BasePackFetchConnection.OPTION_INCLUDE_TAG;
-		private const string OptionMultiAck = BasePackFetchConnection.OPTION_MULTI_ACK;
-		private const string OptionThinPack = BasePackFetchConnection.OPTION_THIN_PACK;
-		private const string OptionSideBand = BasePackFetchConnection.OPTION_SIDE_BAND;
-		private const string OptionSideBand64K = BasePackFetchConnection.OPTION_SIDE_BAND_64K;
-		private const string OptionOfsDelta = BasePackFetchConnection.OPTION_OFS_DELTA;
-		private const string OptionNoProgress = BasePackFetchConnection.OPTION_NO_PROGRESS;
+    /// <summary>
+    /// Implements the server side of a fetch connection, transmitting objects.
+    /// </summary>
+    public class UploadPack : IDisposable
+    {
+        private const string OptionIncludeTag = BasePackFetchConnection.OPTION_INCLUDE_TAG;
+        private const string OptionMultiAck = BasePackFetchConnection.OPTION_MULTI_ACK;
+        private const string OPTION_MULTI_ACK_DETAILED = BasePackFetchConnection.OPTION_MULTI_ACK_DETAILED;
 
-		private readonly Repository _db;
-		private readonly RevWalk.RevWalk _walk;
-		private Dictionary<string, Ref> _refs;
+        private const string OptionThinPack = BasePackFetchConnection.OPTION_THIN_PACK;
+        private const string OptionSideBand = BasePackFetchConnection.OPTION_SIDE_BAND;
+        private const string OptionSideBand64K = BasePackFetchConnection.OPTION_SIDE_BAND_64K;
+        private const string OptionOfsDelta = BasePackFetchConnection.OPTION_OFS_DELTA;
+        private const string OptionNoProgress = BasePackFetchConnection.OPTION_NO_PROGRESS;
 
-		private readonly List<string> _options;
-		private readonly IList<RevObject> _wantAll;
-		private readonly IList<RevCommit> _wantCommits;
-		private readonly IList<RevObject> _commonBase;
+        /// <summary>
+        /// Database we read the objects from.
+        /// </summary>
+        private readonly Repository _db;
 
-		private readonly RevFlag ADVERTISED;
-		private readonly RevFlag WANT;
-		private readonly RevFlag PEER_HAS;
-		private readonly RevFlag COMMON;
-		private readonly RevFlagSet SAVE;
+        /// <summary>
+        /// Revision traversal support over <see cref="_db"/>.
+        /// </summary>
+        private readonly RevWalk.RevWalk _walk;
 
-		private bool _multiAck;
-		private Stream _rawIn;
-		private Stream _rawOut;
-		private int _timeout;
-		private PacketLineIn _pckIn;
-		private PacketLineOut _pckOut;
+        /// <summary>
+        /// Timeout in seconds to wait for client interaction.
+        /// </summary>
+        private int _timeout;
 
-		///	<summary>
-		/// Create a new pack upload for an open repository.
-		/// </summary>
-		/// <param name="copyFrom">the source repository.</param>
-		public UploadPack(Repository copyFrom)
-		{
-			_options = new List<string>();
-			_wantAll = new List<RevObject>();
-			_wantCommits = new List<RevCommit>();
-			_commonBase = new List<RevObject>();
+        /// <summary>
+        /// Is the client connection a bi-directional socket or pipe?
+        /// <para/>
+        /// If true, this class assumes it can perform multiple read and write cycles
+        /// with the client over the input and output streams. This matches the
+        /// functionality available with a standard TCP/IP connection, or a local
+        /// operating system or in-memory pipe.
+        /// <para/>
+        /// If false, this class runs in a read everything then output results mode,
+        /// making it suitable for single round-trip systems RPCs such as HTTP.
+        /// </summary>
+        private bool biDirectionalPipe = true;
 
-			_db = copyFrom;
-			_walk = new RevWalk.RevWalk(_db);
-			_walk.setRetainBody(false);
+        private Stream _rawIn;
+        private Stream _rawOut;
 
-			ADVERTISED = _walk.newFlag("ADVERTISED");
-			WANT = _walk.newFlag("WANT");
-			PEER_HAS = _walk.newFlag("PEER_HAS");
-			COMMON = _walk.newFlag("COMMON");
-			_walk.carry(PEER_HAS);
+        private PacketLineIn _pckIn;
+        private PacketLineOut _pckOut;
 
-			SAVE = new RevFlagSet { ADVERTISED, WANT, PEER_HAS };
-		}
+        /// <summary>
+        /// The refs we advertised as existing at the start of the connection.
+        /// </summary>
+        private IDictionary<string, Ref> _refs;
 
-		public Repository Repository
-		{
-			get { return _db; }
-		}
+        /// <summary>
+        /// Filter used while advertising the refs to the client.
+        /// </summary>
+        private RefFilter _refFilter;
 
-		public RevWalk.RevWalk RevWalk
-		{
-			get { return _walk; }
-		}
+        /// <summary>
+        /// Capabilities requested by the client.
+        /// </summary>
+        private readonly List<string> _options = new List<string>();
 
-		public int Timeout
-		{
-			get { return _timeout; }
-			set { _timeout = value; }
-		}
+        /// <summary>
+        /// Objects the client wants to obtain.
+        /// </summary>
+        private readonly IList<RevObject> _wantAll = new List<RevObject>();
 
-		/// <summary>
-		/// Execute the upload task on the socket.
-		/// </summary>
-		/// <param name="input">
-		/// raw input to read client commands from. Caller must ensure the
-		/// input is buffered, otherwise read performance may suffer.
-		/// </param>
-		/// <param name="output">
-		/// response back to the Git network client, to write the pack
-		/// data onto. Caller must ensure the output is buffered,
-		/// otherwise write performance may suffer.
-		/// </param>
-		/// <param name="messages">
-		/// secondary "notice" channel to send additional messages out
-		/// through. When run over SSH this should be tied back to the
-		/// standard error channel of the command execution. For most
-		/// other network connections this should be null.
-		/// </param>
-		/// <exception cref="IOException"></exception>
-		public void Upload(Stream input, Stream output, Stream messages)
-		{
-			_rawIn = input;
-			_rawOut = output;
+        /// <summary>
+        /// Objects the client wants to obtain.
+        /// </summary>
+        private readonly List<RevCommit> _wantCommits = new List<RevCommit>();
 
-			if (_timeout > 0)
-			{
-				var i = new TimeoutStream(_rawIn, _timeout * 1000);
-				var o = new TimeoutStream(_rawOut, _timeout * 1000);
-				_rawIn = i;
-				_rawOut = o;
-			}
+        /// <summary>
+        /// Objects on both sides, these don't have to be sent.
+        /// </summary>
+        private readonly IList<RevObject> _commonBase = new List<RevObject>();
 
-			_pckIn = new PacketLineIn(_rawIn);
-			_pckOut = new PacketLineOut(_rawOut);
-			Service();
-		}
+        /// <summary>
+        /// null if <see cref="_commonBase"/> should be examined again.
+        /// </summary>
+        private bool? okToGiveUp;
 
-		private void Service()
-		{
-			SendAdvertisedRefs();
-			RecvWants();
-			if (_wantAll.Count == 0) return;
-			_multiAck = _options.Contains(OptionMultiAck);
-			Negotiate();
-			SendPack();
-		}
+        /// <summary>
+        /// Marked on objects we sent in our advertisement list.
+        /// </summary>
+        private readonly RevFlag ADVERTISED;
 
-		private void SendAdvertisedRefs()
-		{
-			_refs = _db.getAllRefs();
+        /// <summary>
+        /// Marked on objects the client has asked us to give them.
+        /// </summary>
+        private readonly RevFlag WANT;
 
-			var adv = new RefAdvertiser(_pckOut, _walk, ADVERTISED);
-			adv.advertiseCapability(OptionIncludeTag);
-			adv.advertiseCapability(OptionMultiAck);
-			adv.advertiseCapability(OptionOfsDelta);
-			adv.advertiseCapability(OptionSideBand);
-			adv.advertiseCapability(OptionSideBand64K);
-			adv.advertiseCapability(OptionThinPack);
-			adv.advertiseCapability(OptionNoProgress);
-			adv.setDerefTags(true);
-			_refs = _db.getAllRefs();
-			adv.send(_refs.Values);
-			_pckOut.End();
-		}
+        /// <summary>
+        /// Marked on objects both we and the client have.
+        /// </summary>
+        private readonly RevFlag PEER_HAS;
 
-		private void RecvWants()
-		{
-			bool isFirst = true;
-			for (; ; isFirst = false)
-			{
-				string line;
-				try
-				{
-					line = _pckIn.ReadString();
-				}
-				catch (EndOfStreamException)
-				{
-					if (isFirst) break;
-					throw;
-				}
+        /// <summary>
+        /// Marked on objects in <see cref="_commonBase"/>.
+        /// </summary>
+        private readonly RevFlag COMMON;
+        private readonly RevFlagSet SAVE;
 
-				if (line.Length == 0) break;
-				if (!line.StartsWith("want ") || line.Length < 45)
-				{
-					throw new PackProtocolException("expected want; got " + line);
-				}
+        private BasePackFetchConnection.MultiAck _multiAck = BasePackFetchConnection.MultiAck.OFF;
 
-				if (isFirst)
-				{
-					int sp = line.IndexOf(' ', 45);
-					if (sp >= 0)
-					{
-						foreach (string c in line.Substring(sp + 1).Split(' '))
-							_options.Add(c);
-						line = line.Slice(0, sp);
-					}
-				}
+        ///	<summary>
+        /// Create a new pack upload for an open repository.
+        /// </summary>
+        /// <param name="copyFrom">the source repository.</param>
+        public UploadPack(Repository copyFrom)
+        {
+            _db = copyFrom;
+            _walk = new RevWalk.RevWalk(_db);
+            _walk.setRetainBody(false);
 
-				string name = line.Substring(5);
-				ObjectId id = ObjectId.FromString(name);
-				RevObject o;
-				try
-				{
-					o = _walk.parseAny(id);
-				}
-				catch (IOException e)
-				{
-					throw new PackProtocolException(name + " not valid", e);
-				}
-				if (!o.has(ADVERTISED))
-				{
-					throw new PackProtocolException(name + " not valid");
-				}
+            ADVERTISED = _walk.newFlag("ADVERTISED");
+            WANT = _walk.newFlag("WANT");
+            PEER_HAS = _walk.newFlag("PEER_HAS");
+            COMMON = _walk.newFlag("COMMON");
+            _walk.carry(PEER_HAS);
 
-				Want(o);
-			}
-		}
+            SAVE = new RevFlagSet { ADVERTISED, WANT, PEER_HAS };
+            _refFilter = RefFilterContants.DEFAULT;
+        }
 
-		private void Want(RevObject o)
-		{
-			if (o.has(WANT)) return;
+        /// <summary>
+        /// the repository this upload is reading from.
+        /// </summary>
+        public Repository Repository
+        {
+            get { return _db; }
+        }
 
-			o.add(WANT);
-			_wantAll.Add(o);
+        /// <summary>
+        /// the RevWalk instance used by this connection.
+        /// </summary>
+        public RevWalk.RevWalk RevWalk
+        {
+            get { return _walk; }
+        }
 
-			RevTag oTag = (o as RevTag);
-			while ( oTag != null)
-			{
-				o = oTag.getObject();
-				oTag = (o as RevTag);
-			}
-			
-			RevCommit oComm = (o as RevCommit);
-			if (oComm != null)
-			{
-				_wantCommits.Add(oComm);
-			}
-			
-		}
+        /// <summary>
+        /// number of seconds to wait (with no data transfer occurring)
+        /// before aborting an IO read or write operation with the
+        /// connected client.
+        /// </summary>
+        public int Timeout
+        {
+            get { return _timeout; }
+            set { _timeout = value; }
+        }
 
-		private void Negotiate()
-		{
-			string lastName = string.Empty;
+        /// <returns>
+        /// true if this class expects a bi-directional pipe opened between
+        /// the client and itself. The default is true.
+        /// </returns>
+        public bool isBiDirectionalPipe()
+        {
+            return biDirectionalPipe;
+        }
 
-			while (true)
-			{
-				string line = _pckIn.ReadString();
+        /// <summary>
+        /// if true, this class will assume the socket is a fully
+        /// bidirectional pipe between the two peers and takes advantage
+        /// of that by first transmitting the known refs, then waiting to
+        /// read commands. If false, this class assumes it must read the
+        /// commands before writing output and does not perform the
+        /// initial advertising.
+        /// </summary>
+        /// <param name="twoWay"></param>
+        public void setBiDirectionalPipe(bool twoWay)
+        {
+            biDirectionalPipe = twoWay;
+        }
 
-				if (line.Length == 0)
-				{
-					if (_commonBase.Count == 0 || _multiAck)
-					{
-						_pckOut.WriteString("NAK\n");
-					}
-					_pckOut.Flush();
-				}
-				else if (line.StartsWith("have ") && line.Length == 45)
-				{
-					string name = line.Substring(5);
-					ObjectId id = ObjectId.FromString(name);
-					if (MatchHave(id))
-					{
-						if (_multiAck)
-						{
-							lastName = name;
-							_pckOut.WriteString("ACK " + name + " continue\n");
-						}
-						else if (_commonBase.Count == 1)
-						{
-							_pckOut.WriteString("ACK " + name + "\n");
-						}
-					}
-					else
-					{
-						if (_multiAck && OkToGiveUp())
-						{
-							_pckOut.WriteString("ACK " + name + " continue\n");
-						}
-					}
-				}
-				else if (line.Equals("done"))
-				{
-					if (_commonBase.Count == 0)
-					{
-						_pckOut.WriteString("NAK\n");
-					}
-					else if (_multiAck)
-					{
-						_pckOut.WriteString("ACK " + lastName + "\n");
-					}
+        /// <returns>the filter used while advertising the refs to the client</returns>
+        public RefFilter getRefFilter()
+        {
+            return _refFilter;
+        }
 
-					break;
-				}
-				else
-				{
-					throw new PackProtocolException("expected have; got " + line);
-				}
-			}
-		}
+        /// <summary>
+        /// Set the filter used while advertising the refs to the client.
+        /// <para/>
+        /// Only refs allowed by this filter will be sent to the client. This can
+        /// be used by a server to restrict the list of references the client can
+        /// obtain through clone or fetch, effectively limiting the access to only
+        /// certain refs.
+        /// </summary>
+        /// <param name="refFilter">the filter; may be null to show all refs.</param>
+        public void setRefFilter(RefFilter refFilter)
+        {
+            _refFilter = refFilter ?? RefFilterContants.DEFAULT;
+        }
 
-		private bool MatchHave(AnyObjectId id)
-		{
-			RevObject o;
-			try
-			{
-				o = _walk.parseAny(id);
-			}
-			catch (IOException)
-			{
-				return false;
-			}
+        /// <summary>
+        /// Execute the upload task on the socket.
+        /// </summary>
+        /// <param name="input">
+        /// raw input to read client commands from. Caller must ensure the
+        /// input is buffered, otherwise read performance may suffer.
+        /// </param>
+        /// <param name="output">
+        /// response back to the Git network client, to write the pack
+        /// data onto. Caller must ensure the output is buffered,
+        /// otherwise write performance may suffer.
+        /// </param>
+        /// <param name="messages">
+        /// secondary "notice" channel to send additional messages out
+        /// through. When run over SSH this should be tied back to the
+        /// standard error channel of the command execution. For most
+        /// other network connections this should be null.
+        /// </param>
+        /// <exception cref="IOException"></exception>
+        public void Upload(Stream input, Stream output, Stream messages)
+        {
+            _rawIn = input;
+            _rawOut = output;
 
-			if (!o.has(PEER_HAS))
-			{
-				o.add(PEER_HAS);
-				RevCommit oComm = (o as RevCommit);
-				if (oComm != null)
-				{
-					oComm.carry(PEER_HAS);
-				}
-				AddCommonBase(o);
-			}
-			return true;
-		}
+            if (_timeout > 0)
+            {
+                var i = new TimeoutStream(_rawIn);
+					i.setTimeout(_timeout * 1000);
+                var o = new TimeoutStream(_rawOut );
+					 o.setTimeout(_timeout * 1000);
+                _rawIn = i;
+                _rawOut = o;
+            }
 
-		private void AddCommonBase(RevObject o)
-		{
-			if (o.has(COMMON)) return;
-			o.add(COMMON);
-			_commonBase.Add(o);
-		}
+            _pckIn = new PacketLineIn(_rawIn);
+            _pckOut = new PacketLineOut(_rawOut);
+            Service();
+        }
 
-		private bool OkToGiveUp()
-		{
-			if (_commonBase.Count == 0) return false;
+        private void Service()
+        {
+            if (biDirectionalPipe)
+                sendAdvertisedRefs(new RefAdvertiser.PacketLineOutRefAdvertiser(_pckOut));
+            else
+            {
+                _refs = _refFilter.filter(_db.getAllRefs());
+                foreach (Ref r in _refs.Values)
+                {
+                    try
+                    {
+                        _walk.parseAny(r.ObjectId).add(ADVERTISED);
+                    }
+                    catch (IOException)
+                    {
+                        // Skip missing/corrupt objects
+                    }
+                }
+            }
 
-			try
-			{
-				for (var i = _wantCommits.GetEnumerator(); i.MoveNext(); )
-				{
-					RevCommit want = i.Current;
-					if (WantSatisfied(want))
-					{
-						_wantCommits.Remove(want);
-					}
-				}
-			}
-			catch (IOException e)
-			{
-				throw new PackProtocolException("internal revision error", e);
-			}
+            RecvWants();
+            if (_wantAll.Count == 0) return;
+            if (_options.Contains(OPTION_MULTI_ACK_DETAILED))
+                _multiAck = BasePackFetchConnection.MultiAck.DETAILED;
+            else if (_options.Contains(OptionMultiAck))
+                _multiAck = BasePackFetchConnection.MultiAck.CONTINUE;
+            else
+                _multiAck = BasePackFetchConnection.MultiAck.OFF;
 
-			return _wantCommits.Count == 0;
-		}
+            if (Negotiate())
+                SendPack();
+        }
 
-		private bool WantSatisfied(RevCommit want)
-		{
-			_walk.resetRetain(SAVE);
-			_walk.markStart(want);
+        /// <summary>
+        /// Generate an advertisement of available refs and capabilities.
+        /// </summary>
+        /// <param name="adv">the advertisement formatter.</param>
+        public void sendAdvertisedRefs(RefAdvertiser adv)
+        {
+            adv.init(_walk, ADVERTISED);
+            adv.advertiseCapability(OptionIncludeTag);
+            adv.advertiseCapability(OPTION_MULTI_ACK_DETAILED);
+            adv.advertiseCapability(OptionMultiAck);
+            adv.advertiseCapability(OptionOfsDelta);
+            adv.advertiseCapability(OptionSideBand);
+            adv.advertiseCapability(OptionSideBand64K);
+            adv.advertiseCapability(OptionThinPack);
+            adv.advertiseCapability(OptionNoProgress);
+            adv.setDerefTags(true);
+            _refs = _refFilter.filter(_db.getAllRefs());
+            adv.send(_refs);
+            adv.end();
+        }
 
-			while (true)
-			{
-				RevCommit c = _walk.next();
-				if (c == null) break;
-				if (c.has(PEER_HAS))
-				{
-					AddCommonBase(c);
-					return true;
-				}
-			}
-			return false;
-		}
+        private void RecvWants()
+        {
+            bool isFirst = true;
+            for (; ; isFirst = false)
+            {
+                string line;
+                try
+                {
+                    line = _pckIn.ReadString();
+                }
+                catch (EndOfStreamException)
+                {
+                    if (isFirst) break;
+                    throw;
+                }
 
-		private void SendPack()
-		{
-			bool thin = _options.Contains(OptionThinPack);
-			bool progress = !_options.Contains(OptionNoProgress);
-			bool sideband = _options.Contains(OptionSideBand) || _options.Contains(OptionSideBand64K);
+                if (line == PacketLineIn.END) break;
+                if (!line.StartsWith("want ") || line.Length < 45)
+                {
+                    throw new PackProtocolException("expected want; got " + line);
+                }
 
-			ProgressMonitor pm = NullProgressMonitor.Instance;
-			Stream packOut = _rawOut;
+                if (isFirst && line.Length > 45)
+                {
+                    string opt = line.Substring(45);
+                    if (opt.StartsWith(" "))
+                        opt = opt.Substring(1);
+                    foreach (string c in opt.Split(' '))
+                        _options.Add(c);
+                    line = line.Slice(0, 45);
+                }
 
-			if (sideband)
-			{
-				int bufsz = SideBandOutputStream.SMALL_BUF;
-				if (_options.Contains(OptionSideBand64K))
-				{
-					bufsz = SideBandOutputStream.MAX_BUF;
-				}
-				bufsz -= SideBandOutputStream.HDR_SIZE;
+                ObjectId id = ObjectId.FromString(line.Substring(5));
+                RevObject o;
+                try
+                {
+                    o = _walk.parseAny(id);
+                }
+                catch (IOException e)
+                {
+                    throw new PackProtocolException(id.Name + " not valid", e);
+                }
+                if (!o.has(ADVERTISED))
+                {
+                    throw new PackProtocolException(id.Name + " not valid");
+                }
 
-				packOut = new BufferedStream(new SideBandOutputStream(SideBandOutputStream.CH_DATA, _pckOut), bufsz);
+                Want(o);
+            }
+        }
 
-				if (progress)
-					pm = new SideBandProgressMonitor(_pckOut);
-			}
+        private void Want(RevObject o)
+        {
+            if (o.has(WANT)) return;
 
-			var pw = new PackWriter(_db, pm, new NullProgressMonitor())
-						{
-							DeltaBaseAsOffset = _options.Contains(OptionOfsDelta),
-							Thin = thin
-						};
+            o.add(WANT);
+            _wantAll.Add(o);
 
-			pw.preparePack(_wantAll, _commonBase);
-			if (_options.Contains(OptionIncludeTag))
-			{
-				foreach (Ref r in _refs.Values)
-				{
-					RevObject o;
-					try
-					{
-						o = _walk.parseAny(r.ObjectId);
-					}
-					catch (IOException)
-					{
-						continue;
-					}
-					RevTag t = (o as RevTag);
-					if (o.has(WANT) || (t == null)) continue;
+            if (o is RevCommit)
+                _wantCommits.Add((RevCommit)o);
 
-					if (!pw.willInclude(t) && pw.willInclude(t.getObject()))
-						pw.addObject(t);
-				}
-			}
+            else if (o is RevTag)
+            {
+                do
+                {
+                    o = ((RevTag)o).getObject();
+                } while (o is RevTag);
+                if (o is RevCommit)
+                    Want(o);
+            }
 
-			pw.writePack(packOut);
+        }
 
-			if (sideband)
-			{
-				packOut.Flush();
-				_pckOut.End();
-			}
-			else
-			{
-				_rawOut.Flush();
-			}
-		}
-		
-		public void Dispose ()
-		{
-			_walk.Dispose();
-			ADVERTISED.Dispose();
-			WANT.Dispose();
-			PEER_HAS.Dispose();
-			COMMON.Dispose();
-			_rawIn.Dispose();
-			_rawOut.Dispose();
-		}
-		
-	}
+        private bool Negotiate()
+        {
+            ObjectId last = ObjectId.ZeroId;
+
+            while (true)
+            {
+                string line = _pckIn.ReadString();
+
+                if (line == PacketLineIn.END)
+                {
+                    if (_commonBase.Count == 0 || _multiAck != BasePackFetchConnection.MultiAck.OFF)
+                    {
+                        _pckOut.WriteString("NAK\n");
+                    }
+                    _pckOut.Flush();
+
+                    if (!biDirectionalPipe)
+                        return false;
+                }
+                else if (line.StartsWith("have ") && line.Length == 45)
+                {
+                    ObjectId id = ObjectId.FromString(line.Substring(5));
+                    if (MatchHave(id))
+                    {
+                        // Both sides have the same object; let the client know.
+                        //
+                        last = id;
+                        switch (_multiAck)
+                        {
+                            case BasePackFetchConnection.MultiAck.OFF:
+                                if (_commonBase.Count == 1)
+                                    _pckOut.WriteString("ACK " + id.Name + "\n");
+                                break;
+                            case BasePackFetchConnection.MultiAck.CONTINUE:
+
+                                _pckOut.WriteString("ACK " + id.Name + " continue\n");
+                                break;
+                            case BasePackFetchConnection.MultiAck.DETAILED:
+                                _pckOut.WriteString("ACK " + id.Name + " common\n");
+                                break;
+                        }
+                    }
+                    else if (OkToGiveUp())
+                    {
+                        // They have this object; we don't.
+                        //
+                        switch (_multiAck)
+                        {
+                            case BasePackFetchConnection.MultiAck.OFF:
+                                break;
+                            case BasePackFetchConnection.MultiAck.CONTINUE:
+                                _pckOut.WriteString("ACK " + id.Name + " continue\n");
+                                break;
+                            case BasePackFetchConnection.MultiAck.DETAILED:
+                                _pckOut.WriteString("ACK " + id.Name + " ready\n");
+                                break;
+                        }
+                    }
+                }
+                else if (line.Equals("done"))
+                {
+                    if (_commonBase.Count == 0)
+                    {
+                        _pckOut.WriteString("NAK\n");
+                    }
+                    else if (_multiAck != BasePackFetchConnection.MultiAck.OFF)
+                    {
+                        _pckOut.WriteString("ACK " + last.Name + "\n");
+                    }
+
+                    return true;
+                }
+                else
+                {
+                    throw new PackProtocolException("expected have; got " + line);
+                }
+            }
+        }
+
+        private bool MatchHave(AnyObjectId id)
+        {
+            RevObject o;
+            try
+            {
+                o = _walk.parseAny(id);
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+
+            if (!o.has(PEER_HAS))
+            {
+                o.add(PEER_HAS);
+                RevCommit oComm = (o as RevCommit);
+                if (oComm != null)
+                {
+                    oComm.carry(PEER_HAS);
+                }
+                AddCommonBase(o);
+            }
+            return true;
+        }
+
+        private void AddCommonBase(RevObject o)
+        {
+            if (o.has(COMMON)) return;
+            o.add(COMMON);
+            _commonBase.Add(o);
+            okToGiveUp = null;
+        }
+
+        private bool OkToGiveUp()
+        {
+            if (okToGiveUp == null)
+            {
+                okToGiveUp = OkToGiveUpImp();
+            }
+            return okToGiveUp.Value;
+        }
+        private bool OkToGiveUpImp()
+        {
+            if (_commonBase.Count == 0) return false;
+
+            try
+            {
+                _wantCommits.RemoveAll(WantSatisfied);
+            }
+            catch (IOException e)
+            {
+                throw new PackProtocolException("internal revision error", e);
+            }
+
+            return _wantCommits.Count == 0;
+        }
+
+        private bool WantSatisfied(RevCommit want)
+        {
+            _walk.resetRetain(SAVE);
+            _walk.markStart(want);
+
+            while (true)
+            {
+                RevCommit c = _walk.next();
+                if (c == null) break;
+                if (c.has(PEER_HAS))
+                {
+                    AddCommonBase(c);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void SendPack()
+        {
+            bool thin = _options.Contains(OptionThinPack);
+            bool progress = !_options.Contains(OptionNoProgress);
+            bool sideband = _options.Contains(OptionSideBand) || _options.Contains(OptionSideBand64K);
+
+            ProgressMonitor pm = NullProgressMonitor.Instance;
+            Stream _packOut = _rawOut;
+
+            if (sideband)
+            {
+                int bufsz = SideBandOutputStream.SMALL_BUF;
+                if (_options.Contains(OptionSideBand64K))
+                {
+                    bufsz = SideBandOutputStream.MAX_BUF;
+                }
+
+                _packOut = new SideBandOutputStream(SideBandOutputStream.CH_DATA, bufsz, _rawOut);
+
+                if (progress)
+                    pm = new SideBandProgressMonitor(new SideBandOutputStream(SideBandOutputStream.CH_PROGRESS, bufsz, _rawOut));
+            }
+
+            var pw = new PackWriter(_db, pm, NullProgressMonitor.Instance)
+                        {
+                            DeltaBaseAsOffset = _options.Contains(OptionOfsDelta),
+                            Thin = thin
+                        };
+
+            pw.preparePack(_wantAll, _commonBase);
+            if (_options.Contains(OptionIncludeTag))
+            {
+                foreach (Ref r in _refs.Values)
+                {
+                    RevObject o;
+                    try
+                    {
+                        o = _walk.parseAny(r.ObjectId);
+                    }
+                    catch (IOException)
+                    {
+                        continue;
+                    }
+                    RevTag t = (o as RevTag);
+                    if (o.has(WANT) || (t == null)) continue;
+
+                    if (!pw.willInclude(t) && pw.willInclude(t.getObject()))
+                        pw.addObject(t);
+                }
+            }
+
+            pw.writePack(_packOut);
+
+            if (sideband)
+            {
+                _packOut.Flush();
+                _pckOut.End();
+            }
+            else
+            {
+                _rawOut.Flush();
+            }
+        }
+
+        public void Dispose()
+        {
+            _walk.Dispose();
+            ADVERTISED.Dispose();
+            WANT.Dispose();
+            PEER_HAS.Dispose();
+            COMMON.Dispose();
+            _rawIn.Dispose();
+            _rawOut.Dispose();
+        }
+
+    }
 }

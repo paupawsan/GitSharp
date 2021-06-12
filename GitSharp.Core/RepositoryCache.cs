@@ -63,11 +63,17 @@ namespace GitSharp.Core
 
         public static void register(Repository db)
         {
+			if (db == null)
+				throw new System.ArgumentNullException ("db");
+			
             Cache.registerRepository(FileKey.exact(db.Directory), db);
         }
 
         public static void close(Repository db)
         {
+			if (db == null)
+				throw new System.ArgumentNullException ("db");
+			
             Cache.unregisterRepository(FileKey.exact(db.Directory));
         }
 
@@ -118,7 +124,7 @@ namespace GitSharp.Core
             WeakReference<Repository> oldRef = cacheMap.put(location, newRef);
             Repository oldDb = oldRef != null ? oldRef.get() : null;
             if (oldDb != null)
-                oldDb.Close();
+                oldDb.Dispose();
 
         }
 
@@ -128,7 +134,7 @@ namespace GitSharp.Core
             cacheMap.Remove(location);
             Repository oldDb = oldRef != null ? oldRef.get() : null;
             if (oldDb != null)
-                oldDb.Close();
+                oldDb.Dispose();
         }
 
         private void clearAll()
@@ -141,7 +147,7 @@ namespace GitSharp.Core
                 {
                     Repository db = e.Value.get();
                     if (db != null)
-                        db.Close();
+                        db.Dispose();
 
                     keysToRemove.Add(e.Key);
                 }
@@ -257,16 +263,16 @@ namespace GitSharp.Core
                     return directory;
                 }
 
-				if (isGitRepository(new DirectoryInfo(Path.Combine(directory.FullName, ".git"))))
+                if (isGitRepository(PathUtil.CombineDirectoryPath(directory, Constants.DOT_GIT)))
 				{
-                    return new DirectoryInfo(Path.Combine(directory.FullName, ".git"));
+                    return PathUtil.CombineDirectoryPath(directory, Constants.DOT_GIT);
 				}
 
                 string name = directory.Name;
                 DirectoryInfo parent = directory.Parent;
-                if (isGitRepository(new DirectoryInfo(Path.Combine(parent.FullName, name + ".git"))))
+                if (isGitRepository(new DirectoryInfo(Path.Combine(parent.FullName, name + Constants.DOT_GIT_EXT))))
                 {
-                    return new DirectoryInfo(Path.Combine(parent.FullName, name + ".git"));
+                    return new DirectoryInfo(Path.Combine(parent.FullName, name + Constants.DOT_GIT_EXT));
                 }
 
                 return null;

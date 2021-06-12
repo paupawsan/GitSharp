@@ -43,6 +43,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using GitSharp.Core.Util;
 
 namespace GitSharp.Core.Transport
 {
@@ -127,8 +128,8 @@ namespace GitSharp.Core.Transport
 		///	<param name="db">the repository instance. </param>
 		public void ExportRepository(string name, Repository db)
 		{
-			if (!name.EndsWith(".git"))
-				name = name + ".git";
+            if (!name.EndsWith(Constants.DOT_GIT_EXT))
+                name = name + Constants.DOT_GIT_EXT;
 			Exports.Add(name, db);
 			RepositoryCache.register(db);
 		}
@@ -224,29 +225,30 @@ namespace GitSharp.Core.Transport
 			var t = new Thread(
 				new ThreadStart(delegate
 									{
-										var stream = new NetworkStream(s);
-										try
-										{
-											dc.Execute(new BufferedStream(stream));
-										}
-										catch (IOException)
-										{
-										}
-										catch (SocketException)
-										{
-										}
-										finally
+										using(NetworkStream stream = new NetworkStream(s))
 										{
 											try
 											{
-												stream.Close();
-												s.Close();
+												dc.Execute(new BufferedStream(stream));
 											}
 											catch (IOException)
 											{
 											}
 											catch (SocketException)
 											{
+											}
+											finally
+											{
+												try
+												{
+													s.Close();
+												}
+												catch (IOException)
+												{
+												}
+												catch (SocketException)
+												{
+												}
 											}
 										}
 									}));
@@ -302,7 +304,7 @@ namespace GitSharp.Core.Transport
 
 			Repository db = Exports[name];
 			if (db != null) return db;
-			db = Exports[name + ".git"];
+            db = Exports[name + Constants.DOT_GIT_EXT];
 			if (db != null) return db;
 
 			DirectoryInfo[] search = ExportBase.ToArray();
@@ -314,10 +316,10 @@ namespace GitSharp.Core.Transport
 				db = OpenRepository(new DirectoryInfo(p + name));
 				if (db != null) return db;
 
-				db = OpenRepository(new DirectoryInfo(p + name + ".git"));
+                db = OpenRepository(new DirectoryInfo(p + name + Constants.DOT_GIT_EXT));
 				if (db != null) return db;
 
-				db = OpenRepository(new DirectoryInfo(p + name + "/.git"));
+                db = OpenRepository(new DirectoryInfo(p + name + "/" + Constants.DOT_GIT));
 				if (db != null) return db;
 			}
 			return null;
@@ -357,10 +359,10 @@ namespace GitSharp.Core.Transport
 				Enabled = true;
 			}
 
-			public override void Execute(DaemonClient dc, Repository db)
+			public override void Execute(DaemonClient client, Repository db)
 			{
 				var rp = new UploadPack(db);
-				Stream stream = dc.Stream;
+				Stream stream = client.Stream;
 				rp.Upload(stream, null, null);
 			}
 		}
@@ -373,9 +375,9 @@ namespace GitSharp.Core.Transport
 				Enabled = false;
 			}
 
-			public override void Execute(DaemonClient dc, Repository db)
+			public override void Execute(DaemonClient client, Repository db)
 			{
-				EndPoint peer = dc.Peer;
+				EndPoint peer = client.Peer;
 
 				var ipEndpoint = peer as IPEndPoint;
 				if (ipEndpoint == null)
@@ -385,11 +387,11 @@ namespace GitSharp.Core.Transport
 
 				string host = Dns.GetHostEntry(ipEndpoint.Address).HostName ?? ipEndpoint.Address.ToString();
 				var rp = new ReceivePack(db);
-				Stream stream = dc.Stream;
+				Stream stream = client.Stream;
 				const string name = "anonymous";
 				string email = name + "@" + host;
 				rp.setRefLogIdent(new PersonIdent(name, email));
-				rp.receive(stream, null);
+				rp.receive(stream, stream, null);
 			}
 		}
 

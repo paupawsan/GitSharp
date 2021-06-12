@@ -39,9 +39,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Linq;
 using System.Text;
 using System.IO;
+using System.Text.RegularExpressions;
 
 namespace GitSharp.Core.Util
 {
@@ -77,8 +79,7 @@ namespace GitSharp.Core.Util
         /// <param name="path"></param>
         public static bool DeleteFile(this FileSystemInfo path)
         {
-            DeleteFile(path.FullName);
-            return true;
+            return DeleteFile(path.FullName);
         }
 
         /// <summary>
@@ -91,8 +92,66 @@ namespace GitSharp.Core.Util
             if (!file.Exists) return false;
 
             file.IsReadOnly = false;
-            file.Delete();
+            try
+            {
+                file.Delete();
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
             return true;
         }
+
+		  /// <summary>
+		  /// Computes relative path, where path is relative to reference_path
+		  /// </summary>
+		  /// <param name="reference_path"></param>
+		  /// <param name="path"></param>
+		  /// <returns></returns>
+		  public static string RelativePath(string reference_path, string path)
+		  {
+			  if (reference_path == null)
+				  throw new ArgumentNullException("reference_path");
+			  if (path == null)
+				  throw new ArgumentNullException("path");
+			  //reference_path = reference_path.Replace('/', '\\');
+			  //path = path.Replace('/', '\\');
+			  bool isRooted = Path.IsPathRooted(reference_path) && Path.IsPathRooted(path);
+			  if (isRooted)
+			  {
+				  bool isDifferentRoot = string.Compare(Path.GetPathRoot(reference_path), Path.GetPathRoot(path), true) != 0;
+				  if (isDifferentRoot)
+					  return path;
+			  }
+			  var relativePath = new StringCollection();
+			  string[] fromDirectories = Regex.Split(reference_path, @"[/\\]+");
+			  string[] toDirectories = Regex.Split( path, @"[/\\]+");
+			  int length = Math.Min(fromDirectories.Length, toDirectories.Length);
+			  int lastCommonRoot = -1;
+			  // find common root
+			  for (int x = 0; x < length; x++)
+			  {
+				  if (string.Compare(fromDirectories[x],
+						toDirectories[x], true) != 0)
+					  break;
+				  lastCommonRoot = x;
+			  }
+			  if (lastCommonRoot == -1)
+				  return string.Join(Path.DirectorySeparatorChar.ToString(), toDirectories);
+			  // add relative folders in from path
+			  for (int x = lastCommonRoot + 1; x < fromDirectories.Length; x++)
+				  if (fromDirectories[x].Length > 0)
+					  relativePath.Add("..");
+			  // add to folders to path
+			  for (int x = lastCommonRoot + 1; x < toDirectories.Length; x++)
+				  relativePath.Add(toDirectories[x]);
+			  // create relative path
+			  string[] relativeParts = new string[relativePath.Count];
+			  relativePath.CopyTo(relativeParts, 0);
+			  string newPath = string.Join(Path.DirectorySeparatorChar.ToString(), relativeParts);
+			  return newPath;
+		  }
     }
 }

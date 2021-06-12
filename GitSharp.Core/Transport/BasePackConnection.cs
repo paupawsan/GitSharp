@@ -37,6 +37,7 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -45,32 +46,83 @@ using GitSharp.Core.Util;
 
 namespace GitSharp.Core.Transport
 {
-
+    /// <summary>
+    /// Base helper class for pack-based operations implementations. Provides partial
+    /// implementation of pack-protocol - refs advertising and capabilities support,
+    /// and some other helper methods.
+    /// </summary>
     public abstract class BasePackConnection : BaseConnection
     {
+        /// <summary>
+        /// The repository this transport fetches into, or pushes out of.
+        /// </summary>
         protected readonly Repository local;
+
+        /// <summary>
+        /// Remote repository location.
+        /// </summary>
         protected readonly URIish uri;
+
+        /// <summary>
+        /// A transport connected to <see cref="uri"/>.
+        /// </summary>
         protected readonly Transport transport;
-        protected Stream stream;
+
+        /// <summary>
+        /// Buffered output stream sending to the remote.
+        /// </summary>
+        protected Stream outStream;
+
+        /// <summary>
+        /// Buffered input stream reading from the remote.
+        /// </summary>
+        protected Stream inStream;
+
+        /// <summary>
+        /// Packet line decoder around <see cref="inStream"/>.
+        /// </summary>
         protected PacketLineIn pckIn;
+
+        /// <summary>
+        /// Packet line encoder around <see cref="outStream"/>.
+        /// </summary>
         protected PacketLineOut pckOut;
+
+        /// <summary>
+        /// Send <see cref="PacketLineOut.End"/> before closing <see cref="outStream"/>?
+        /// </summary>
         protected bool outNeedsEnd;
+
+        /// <summary>
+        /// Capability tokens advertised by the remote side.
+        /// </summary>
         private readonly List<string> remoteCapabilies = new List<string>();
+
+        /// <summary>
+        /// Extra objects the remote has, but which aren't offered as refs.
+        /// </summary>
         protected readonly List<ObjectId> additionalHaves = new List<ObjectId>();
 
         protected BasePackConnection(IPackTransport packTransport)
         {
-            transport = (Transport) packTransport;
+            transport = (Transport)packTransport;
             local = transport.Local;
             uri = transport.Uri;
         }
 
         protected void init(Stream myStream)
         {
-            stream = myStream is BufferedStream ? myStream : new BufferedStream(myStream, IndexPack.BUFFER_SIZE);
+            init(myStream, myStream);
+        }
 
-            pckIn = new PacketLineIn(stream);
-            pckOut = new PacketLineOut(stream);
+        protected void init(Stream instream, Stream outstream)
+        {
+            inStream = instream is BufferedStream ? instream : new BufferedStream(instream, IndexPack.BUFFER_SIZE);
+            outStream = outstream is BufferedStream ? outstream : new BufferedStream(outstream, IndexPack.BUFFER_SIZE);
+
+            pckIn = new PacketLineIn(inStream);
+            pckOut = new PacketLineOut(outStream);
+
             outNeedsEnd = true;
         }
 
@@ -82,12 +134,17 @@ namespace GitSharp.Core.Transport
             }
             catch (TransportException)
             {
-                Close();
+                Dispose();
                 throw;
             }
             catch (IOException err)
             {
-                Close();
+                Dispose();
+                throw new TransportException(err.Message, err);
+            }
+            catch (Exception err)
+            {
+                Dispose();
                 throw new TransportException(err.Message, err);
             }
         }
@@ -107,59 +164,72 @@ namespace GitSharp.Core.Transport
                 {
                     if (avail.Count == 0)
                     {
-                    	throw noRepository();
+                        throw noRepository();
                     }
 
                     throw;
                 }
+
+                if (line == PacketLineIn.END)
+                    break;
 
                 if (avail.Count == 0)
                 {
                     int nul = line.IndexOf('\0');
                     if (nul >= 0)
                     {
+                        // The first line (if any) may contain "hidden"
+                        // capability values after a NUL byte.
                         foreach (string c in line.Substring(nul + 1).Split(' '))
                             remoteCapabilies.Add(c);
                         line = line.Slice(0, nul);
                     }
                 }
 
-                if (line.Length == 0)
-                    break;
-
                 string name = line.Slice(41, line.Length);
                 if (avail.Count == 0 && name.Equals("capabilities^{}"))
                 {
+                    // special line from git-receive-pack to show
+                    // capabilities when there are no refs to advertise
                     continue;
                 }
 
-                string idname = line.Slice(0, 40);
-                ObjectId id = ObjectId.FromString(idname);
+                ObjectId id = ObjectId.FromString(line.Slice(0, 40));
                 if (name.Equals(".have"))
                     additionalHaves.Add(id);
                 else if (name.EndsWith("^{}"))
                 {
                     name = name.Slice(0, name.Length - 3);
-                    Ref prior = avail.ContainsKey(name) ? avail[name] : null;
+                    Ref prior = avail.get(name);
                     if (prior == null)
                         throw new PackProtocolException(uri, "advertisement of " + name + "^{} came before " + name);
 
                     if (prior.PeeledObjectId != null)
                         throw duplicateAdvertisement(name + "^{}");
 
-                    avail[name] = new Ref(Ref.Storage.Network, name, prior.ObjectId, id, true);
+                    avail.put(name, new PeeledTag(Storage.Network, name, prior.ObjectId, id));
                 }
                 else
                 {
-                    Ref prior = avail.ContainsKey(name) ? avail[name] : null;
+                    Ref prior = avail.put(name, new PeeledNonTag(Storage.Network, name, id));
                     if (prior != null)
                         throw duplicateAdvertisement(name);
-                    avail.Add(name, new Ref(Ref.Storage.Network, name, id));
+                    
                 }
             }
             available(avail);
         }
 
+        /// <summary>
+        /// Create an exception to indicate problems finding a remote repository. The
+        /// caller is expected to throw the returned exception.
+        /// <para/>
+        /// Subclasses may override this method to provide better diagnostics.
+        /// </summary>
+        /// <returns>
+        /// a TransportException saying a repository cannot be found and
+        /// possibly why.
+        /// </returns>
         protected virtual TransportException noRepository()
         {
             return new NoRemoteRepositoryException(uri, "not found.");
@@ -186,25 +256,54 @@ namespace GitSharp.Core.Transport
 
         public override void Close()
         {
-            if (stream != null)
+            if (outStream != null)
             {
                 try
                 {
                     if (outNeedsEnd)
                         pckOut.End();
-                    stream.Close();
+                    outStream.Close();
                 }
                 catch (IOException)
                 {
-                    
+                    // Ignore any close errors.
                 }
                 finally
                 {
-                    stream = null;
+                    outStream = null;
                     pckOut = null;
                 }
+            } 
+            
+            if (inStream != null)
+            {
+                try
+                {
+                    inStream.Close();
+                }
+                catch (IOException)
+                {
+                    // Ignore any close errors.
+                }
+                finally
+                {
+                    inStream = null;
+                    pckIn = null;
+                }
             }
+
+#if DEBUG
+            GC.SuppressFinalize(this); // Disarm lock-release checker
+#endif
         }
+
+#if DEBUG
+        // A debug mode warning if the type has not been disposed properly
+        ~BasePackConnection()
+        {
+            Console.Error.WriteLine(GetType().Name + " has not been properly disposed: " + this.uri);
+        }
+#endif
     }
 
 }

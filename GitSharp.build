@@ -3,8 +3,10 @@
 
   <property name="build.config" value="debug" overwrite="false" />
   <property name="build.platform" value="${nant.settings.currentframework}" />
-  <property name="build.defines" value="TRACE" />
+  <property name="build.defines" value="TRACE;LINQ;DEBUG" />
 
+  <property name="build.runs.on.mono" value="${(framework::get-family(framework::get-runtime-framework()) == 'mono')}" />
+  
   <property name="path.base" value="${project::get-base-directory()}"/>
   <property name="path.build" value="${path.base}/build"/>
   <property name="path.lib" value="${path.base}/lib"/>
@@ -40,14 +42,13 @@
   <target name="compile-core" depends="init">
     <property name="assembly.name" value="GitSharp.Core" />
     <property name="assembly.type" value="library" />
+    <property name="project.directory" value="${assembly.name}" />
 
     <property name="assembly.namespace" value="${assembly.name}" />
     
     <fileset id="project.references" >
       <include name="System.dll" />
       <include name="System.Core.dll" />
-      <include name="System.Drawing.dll" />
-      <include name="System.Windows.Forms.dll" />
       <include name="System.Xml.dll" />
       <include name="${path.lib}/ICSharpCode.SharpZipLib.dll" />
       <include name="${path.lib}/Winterdom.IO.FileMap.dll" />
@@ -61,8 +62,9 @@
   <!-- git.exe -->
   <!-- ********************************************** -->
   <target name="compile-cli" depends="compile-gitsharp">
-    <property name="assembly.name" value="Git" />
+    <property name="assembly.name" value="GitSharp.Git" />
     <property name="assembly.type" value="exe" />
+    <property name="project.directory" value="Git" />
 
     <property name="assembly.namespace" value="GitSharp.CLI" />
     
@@ -86,11 +88,15 @@
   <target name="compile-gitsharp" depends="compile-core">
     <property name="assembly.name" value="GitSharp" />
     <property name="assembly.type" value="library" />
+    <property name="project.directory" value="${assembly.name}" />
 
     <property name="assembly.namespace" value="${assembly.name}" />
 
     <fileset id="project.references" basedir="${path.build.output}" >
+      <include name="System.dll" />
+      <include name="System.Core.dll" />
       <include name="GitSharp.Core.dll" />
+      <include name="${path.lib}/Tamir.SharpSSH.dll" />
     </fileset>
 
     <call target="compile-dll" />
@@ -102,12 +108,14 @@
   <target name="compile-tests" depends="compile-cli">
     <property name="assembly.name" value="GitSharp.Tests" />
     <property name="assembly.type" value="library" />
+    <property name="project.directory" value="${assembly.name}" />
 
     <property name="assembly.namespace" value="${assembly.name}" />
 
     <fileset id="project.references" >
       <include name="${path.build.output}/GitSharp.dll" />
       <include name="${path.build.output}/GitSharp.Core.dll" />
+      <include name="${path.build.output}/GitSharp.Git.exe" />
       <include name="${path.tools.nunit}/nunit.framework.dll" />
     </fileset>
 
@@ -126,6 +134,7 @@
     <copy todir="${path.testresults}">
       <fileset basedir="${path.base}/GitSharp.Tests/Resources">
         <include name="${path.build.output}/*.dll" />
+        <include name="${path.build.output}/GitSharp.Git.exe" />
       </fileset>
     </copy>
 
@@ -137,7 +146,7 @@
 
     <property name="nunit.consolerunner" value="${path.tools.nunit}/nunit-console.exe" />
     <property name="nunit.commandline" value="GitSharp.Tests.dll /xml:GitSharp.Tests.dll-results.xml /noshadow " />
-    <if test="${(framework::get-family(framework::get-runtime-framework()) == 'mono')}">
+    <if test="${build.runs.on.mono}">
       <property name="nunit.consolerunner" value="nunit-console2" />
       <property name="nunit.commandline" value="GitSharp.Tests.dll -xml:GitSharp.Tests.dll-results.xml -noshadow " />
     </if>
@@ -148,6 +157,18 @@
       commandline="${nunit.commandline}"
       failonerror="true"
 			/>
+
+
+    <property name="debugger.file.path.before" value="${path.build.output}/GitSharp.Git.pdb" />
+    <property name="debugger.file.path.after" value="${path.build.output}/Git.pdb"  />
+
+    <property name="debugger.file.path.before" value="${path.build.output}/GitSharp.Git.exe.mdb" if="${build.runs.on.mono}" />
+    <property name="debugger.file.path.after" value="${path.build.output}/Git.exe.mdb" if="${build.runs.on.mono}" />
+
+
+    <move file="${path.build.output}/GitSharp.Git.exe" tofile="${path.build.output}/Git.exe" />
+    <move file="${debugger.file.path.before}" tofile="${debugger.file.path.after}" />
+    <move file="${path.build.output}/GitSharp.Git.xml" tofile="${path.build.output}/Git.xml" />
   </target>
 
   <target name="init">
@@ -188,12 +209,12 @@
 
   <target name="set-release-project-configuration" >
     <property name="build.optimize"	value="true" />
+    <property name="build.defines" value="LINQ;TRACE" />
   </target>
 
   <target name="compile-dll">
     <call target="copy-references"/>
 
-    <property name="project.directory" value="${assembly.name}" />
     <property name="project.sources.path" value="${path.base}/${project.directory}"/>
 
     <call target="create-assembly-info"/>
@@ -207,6 +228,7 @@
 
     <csc target="${assembly.type}"
          debug="Full"
+         define="${build.defines}"
          optimize="${build.optimize}"
          output="${path.build.output}/${assembly.name}.${assembly.extension}"
          doc="${path.build.output}/${assembly.name}.xml" >

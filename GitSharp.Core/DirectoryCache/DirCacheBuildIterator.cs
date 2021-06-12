@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008, Shawn O. Pearce <spearce@spearce.org>
  * Copyright (C) 2009, Henon <meinrad.recheis@gmail.com>
  *
@@ -87,6 +87,10 @@ namespace GitSharp.Core.DirectoryCache
         public DirCacheBuildIterator(DirCacheBuilder builder)
             : base(builder.getDirCache())
         {
+			if ( builder == null)
+			{
+				throw new System.ArgumentNullException("builder");
+			}
             _builder = builder;
         }
 
@@ -102,6 +106,9 @@ namespace GitSharp.Core.DirectoryCache
         DirCacheBuildIterator(DirCacheBuildIterator parentIterator, DirCacheTree cacheTree)
             : base(parentIterator, cacheTree)
         {
+			if (parentIterator == null)
+				throw new System.ArgumentNullException ("parentIterator");
+			
             _builder = parentIterator._builder;
         }
 
@@ -124,7 +131,7 @@ namespace GitSharp.Core.DirectoryCache
             }
             else
             {
-            	_builder.add(CurrentEntry);
+            	_builder.keep(Pointer, 1);
             }
             next(1);
         }

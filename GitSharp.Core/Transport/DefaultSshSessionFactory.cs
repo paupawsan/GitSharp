@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008, Robin Rosenberg <robin.rosenberg@dewire.com>
  * Copyright (C) 2008, Shawn O. Pearce <spearce@spearce.org>
  *
@@ -36,19 +36,25 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-using System;
 using Tamir.SharpSsh.jsch;
 
 namespace GitSharp.Core.Transport
 {
+    /// <summary>
+    /// Loads known hosts and private keys from <code>$HOME/.ssh</code>.
+    /// <para/>
+    /// This is the default implementation used by JGit and provides most of the
+    /// compatibility necessary to match OpenSSH, a popular implementation of SSH
+    /// used by C Git.
+    /// <para/>
+    /// If user interactivity is required by SSH (e.g. to obtain a password), the
+    /// connection will immediately fail.
+    /// </summary>
     public class DefaultSshSessionFactory : SshConfigSessionFactory
     {
         protected override void configure(OpenSshConfig.Host hc, Session session)
         {
-            if (!hc.isBatchMode())
-            {
-                session.setUserInfo(UserInfoProvider.Provider);
-            }
+            // No additional configuration required.
         }
     }
 }

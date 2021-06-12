@@ -96,6 +96,15 @@ namespace GitSharp.Core.Diff
 		/// <param name="b">writing to the supplied stream failed.</param>
 		public void format(Stream @out, FileHeader head, RawText a, RawText b)
 		{
+			if ( head == null)
+			{
+				throw new System.ArgumentNullException("head");
+			}
+			if ( @out == null)
+			{
+				throw new System.ArgumentNullException("out");
+			}
+			
 			// Reuse the existing FileHeader as-is by blindly copying its
 			// header lines, but avoiding its hunks. Instead we recreate
 			// the hunks from the text instances we have been supplied.
@@ -113,7 +122,14 @@ namespace GitSharp.Core.Diff
 			FormatEdits(@out, a, b, head.ToEditList());
 		}
 
-		private void FormatEdits(Stream @out, RawText a, RawText b, EditList edits)
+        /// <summary>
+        /// Formats a list of edits in unified diff format
+        /// </summary>
+        /// <param name="out">where the unified diff is written to</param>
+        /// <param name="a">the text A which was compared</param>
+        /// <param name="b">the text B which was compared</param>
+        /// <param name="edits">some differences which have been calculated between A and B</param>
+		public void FormatEdits(Stream @out, RawText a, RawText b, EditList edits)
 		{
 			for (int curIdx = 0; curIdx < edits.Count; /* */)
 			{

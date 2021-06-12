@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2009, Robin Rosenberg
  *
  * All rights reserved.
@@ -59,11 +59,11 @@ namespace GitSharp.Core
             public Entry(byte[] raw, int pos)
             {
                 oldId = ObjectId.FromString(raw, pos);
-                pos += Constants.OBJECT_ID_LENGTH*2;
+                pos += Constants.OBJECT_ID_STRING_LENGTH;
                 if (raw[pos++] != ' ')
                     throw new ArgumentException("Raw log message does not parse as log entry");
                 newId = ObjectId.FromString(raw, pos);
-                pos += Constants.OBJECT_ID_LENGTH * 2;
+                pos += Constants.OBJECT_ID_STRING_LENGTH;
                 if (raw[pos++] != ' ')
                     throw new ArgumentException("Raw log message does not parse as log entry");
                 who = RawParseUtils.parsePersonIdentOnly(raw, pos);
@@ -126,6 +126,8 @@ namespace GitSharp.Core
 		/// </summary>
 		public ReflogReader(Repository db, string refName)
 		{
+			if (db == null)
+				throw new ArgumentNullException ("db");
 			_logName = new FileInfo(
 				Path.Combine(
 					db.Directory.FullName,

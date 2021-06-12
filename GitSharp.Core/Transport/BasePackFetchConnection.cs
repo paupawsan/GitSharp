@@ -1,6 +1,8 @@
 /*
+ * Copyright (C) 2008-2010, Google Inc.
  * Copyright (C) 2008, Robin Rosenberg <robin.rosenberg@dewire.com>
  * Copyright (C) 2008, Shawn O. Pearce <spearce@spearce.org>
+ * Copyright (C) 2010, Henon <meinrad.recheis@gmail.com>
  *
  * All rights reserved.
  *
@@ -43,15 +45,50 @@ using System.Text;
 using GitSharp.Core.Exceptions;
 using GitSharp.Core.RevWalk;
 using GitSharp.Core.RevWalk.Filter;
+using GitSharp.Core.Util;
 
 namespace GitSharp.Core.Transport
 {
-    public class BasePackFetchConnection : BasePackConnection, IFetchConnection, IDisposable
+    /// <summary>
+    /// Fetch implementation using the native Git pack transfer service.
+    /// <para/>
+    /// This is the canonical implementation for transferring objects from the remote
+    /// repository to the local repository by talking to the 'git-upload-pack'
+    /// service. Objects are packed on the remote side into a pack file and then sent
+    /// down the pipe to us.
+    /// <para/>
+    /// This connection requires only a bi-directional pipe or socket, and thus is
+    /// easily wrapped up into a local process pipe, anonymous TCP socket, or a
+    /// command executed through an SSH tunnel.
+    /// <para/>
+    /// Concrete implementations should just call
+    /// <see cref="BasePackConnection.init(System.IO.Stream,System.IO.Stream)"/> and
+    /// <see cref="BasePackConnection.readAdvertisedRefs"/> methods in constructor or before any use. They
+    /// should also handle resources releasing in <see cref="BasePackConnection.Close"/> method if needed.
+    /// </summary>
+    public class BasePackFetchConnection : BasePackConnection, IFetchConnection
     {
+        /// <summary>
+        /// Maximum number of 'have' lines to send before giving up.
+        /// <para/>
+        /// During <see cref="Negotiate"/> we send at most this many
+        /// commits to the remote peer as 'have' lines without an ACK response before
+        /// we give up.
+        /// </summary>
         private const int MAX_HAVES = 256;
+
+        /// <summary>
+        /// Amount of data the client sends before starting to read.
+        /// <para/>
+        /// Any output stream given to the client must be able to buffer this many
+        /// bytes before the client will stop writing and start reading from the
+        /// input stream. If the output stream blocks before this many bytes are in
+        /// the send queue, the system will deadlock.
+        /// </summary>
         protected const int MIN_CLIENT_BUFFER = 2 * 32 * 46 + 8;
         public const string OPTION_INCLUDE_TAG = "include-tag";
         public const string OPTION_MULTI_ACK = "multi_ack";
+        public const string OPTION_MULTI_ACK_DETAILED = "multi_ack_detailed";
         public const string OPTION_THIN_PACK = "thin-pack";
         public const string OPTION_SIDE_BAND = "side-band";
         public const string OPTION_SIDE_BAND_64K = "side-band-64k";
@@ -59,14 +96,38 @@ namespace GitSharp.Core.Transport
         public const string OPTION_SHALLOW = "shallow";
         public const string OPTION_NO_PROGRESS = "no-progress";
 
+        public enum MultiAck
+        {
+            OFF,
+            CONTINUE,
+            DETAILED
+        }
+
         private readonly RevWalk.RevWalk _walk;
-		private readonly bool _allowOfsDelta;
-        
+
+        /// <summary>
+        /// All commits that are immediately reachable by a local ref.
+        /// </summary>
+        private RevCommitList<RevCommit> _reachableCommits;
+
+        private readonly bool _allowOfsDelta;
+
+        /// <summary>
+        /// Marks an object as having all its dependencies.
+        /// </summary>
         public readonly RevFlag REACHABLE;
+
+        /// <summary>
+        /// Marks a commit known to both sides of the connection.
+        /// </summary>
         public readonly RevFlag COMMON;
+
+        /// <summary>
+        /// Marks a commit listed in the advertised refs.
+        /// </summary>
         public readonly RevFlag ADVERTISED;
-		private RevCommitList<RevCommit> _reachableCommits;
-        private bool _multiAck;
+
+        private MultiAck _multiAck = MultiAck.OFF;
         private bool _thinPack;
         private bool _sideband;
         private bool _includeTags;
@@ -76,10 +137,10 @@ namespace GitSharp.Core.Transport
         public BasePackFetchConnection(IPackTransport packTransport)
             : base(packTransport)
         {
-            RepositoryConfig cfg = local.Config;
+            FetchConfig cfg = local.Config.get(FetchConfig.KEY);
             _includeTags = transport.TagOpt != TagOpt.NO_TAGS;
             _thinPack = transport.FetchThin;
-            _allowOfsDelta = cfg.getBoolean("repack", "usedeltabaseoffset", true);
+            _allowOfsDelta = cfg.AllowOfsDelta;
 
             _walk = new RevWalk.RevWalk(local);
             _reachableCommits = new RevCommitList<RevCommit>();
@@ -92,7 +153,32 @@ namespace GitSharp.Core.Transport
             _walk.carry(ADVERTISED);
         }
 
-        public void Fetch(ProgressMonitor monitor, List<Ref> want, List<ObjectId> have)
+        private class FetchConfig
+        {
+            public static Config.SectionParser<FetchConfig> KEY = new FetchConfigSectionParser();
+
+            readonly bool _allowOfsDelta;
+
+            FetchConfig(Config c)
+            {
+                _allowOfsDelta = c.getBoolean("repack", "usedeltabaseoffset", true);
+            }
+
+            private class FetchConfigSectionParser : Config.SectionParser<FetchConfig>
+            {
+                public FetchConfig parse(Config cfg)
+                {
+                    return new FetchConfig(cfg);
+                }
+            }
+
+            public bool AllowOfsDelta
+            {
+                get { return _allowOfsDelta; }
+            }
+        }
+
+        public void Fetch(ProgressMonitor monitor, ICollection<Ref> want, IList<ObjectId> have)
         {
             markStartedOperation();
             doFetch(monitor, want, have);
@@ -115,10 +201,18 @@ namespace GitSharp.Core.Transport
 
         public List<PackLock> PackLocks
         {
-            get { return _packLock != null ? new List<PackLock> { _packLock } : new List<PackLock>(); }
+            get
+            {
+                if (_packLock != null)
+                {
+                    return new List<PackLock> { _packLock };
+                }
+
+                return new List<PackLock>();
+            }
         }
 
-        protected void doFetch(ProgressMonitor monitor, List<Ref> want, List<ObjectId> have)
+        protected void doFetch(ProgressMonitor monitor, ICollection<Ref> want, IList<ObjectId> have)
         {
             try
             {
@@ -137,12 +231,17 @@ namespace GitSharp.Core.Transport
             }
             catch (CancelledException)
             {
-                Close();
-                return;
+                Dispose();
+                return; // Caller should test (or just know) this themselves.
             }
             catch (IOException err)
             {
-                Close();
+                Dispose();
+                throw new TransportException(err.Message, err);
+            }
+            catch (Exception err)
+            {
+                Dispose();
                 throw new TransportException(err.Message, err);
             }
         }
@@ -154,7 +253,7 @@ namespace GitSharp.Core.Transport
             {
                 try
                 {
-                    RevCommit obj = (_walk.parseAny(r.ObjectId) as RevCommit);
+                    var obj = (_walk.parseAny(r.ObjectId) as RevCommit);
                     if (obj != null)
                     {
                         int cTime = obj.CommitTime;
@@ -164,6 +263,7 @@ namespace GitSharp.Core.Transport
                 }
                 catch (IOException)
                 {
+                    // We don't have it, but we want to fetch (thus fixing error).
                 }
             }
 
@@ -182,6 +282,7 @@ namespace GitSharp.Core.Transport
                 }
                 catch (IOException)
                 {
+                    // If we cannot read the value of the ref skip it.
                 }
             }
 
@@ -195,12 +296,17 @@ namespace GitSharp.Core.Transport
                 }
                 catch (IOException)
                 {
+                    // If we cannot read the value of the ref skip it.
                 }
             }
 
             if (maxTime > 0)
             {
-                DateTime maxWhen = new DateTime(1970, 1, 1) + TimeSpan.FromSeconds(maxTime);
+                // Mark reachable commits until we reach maxTime. These may
+                // wind up later matching up against things we want and we
+                // can avoid asking for something we already happen to have.
+                //
+                DateTime maxWhen = (maxTime * 1000L).MillisToUtcDateTime();
                 _walk.sort(RevSort.COMMIT_TIME_DESC);
                 _walk.markStart(_reachableCommits);
                 _walk.setRevFilter(CommitTimeRevFilter.After(maxWhen));
@@ -228,11 +334,16 @@ namespace GitSharp.Core.Transport
                 {
                     if (_walk.parseAny(r.ObjectId).has(REACHABLE))
                     {
+                        // We already have this object. Asking for it is
+                        // not a very good idea.
+                        //
                         continue;
                     }
                 }
                 catch (IOException)
                 {
+                    // Its OK, we don't have it, but we want to fix that
+                    // by fetching the object from the other side.
                 }
 
                 var line = new StringBuilder(46);
@@ -258,7 +369,14 @@ namespace GitSharp.Core.Transport
                 _includeTags = wantCapability(line, OPTION_INCLUDE_TAG);
             if (_allowOfsDelta)
                 wantCapability(line, OPTION_OFS_DELTA);
-            _multiAck = wantCapability(line, OPTION_MULTI_ACK);
+
+            if (wantCapability(line, OPTION_MULTI_ACK_DETAILED))
+                _multiAck = MultiAck.DETAILED;
+            else if (wantCapability(line, OPTION_MULTI_ACK))
+                _multiAck = MultiAck.CONTINUE;
+            else
+                _multiAck = MultiAck.OFF;
+
             if (_thinPack)
                 _thinPack = wantCapability(line, OPTION_THIN_PACK);
             if (wantCapability(line, OPTION_SIDE_BAND_64K))
@@ -276,13 +394,15 @@ namespace GitSharp.Core.Transport
             int havesSinceLastContinue = 0;
             bool receivedContinue = false;
             bool receivedAck = false;
-            bool sendHaves = true;
 
             NegotiateBegin();
-            while (sendHaves)
+            for (; ; )
             {
                 RevCommit c = _walk.next();
-                if (c == null) break;
+                if (c == null)
+                {
+                    goto END_SEND_HAVES;
+                }
 
                 pckOut.WriteString("have " + c.getId().Name + "\n");
                 havesSent++;
@@ -290,6 +410,10 @@ namespace GitSharp.Core.Transport
 
                 if ((31 & havesSent) != 0)
                 {
+                    // We group the have lines into blocks of 32, each marked
+                    // with a flush (aka end). This one is within a block so
+                    // continue with another have line.
+                    //
                     continue;
                 }
 
@@ -297,10 +421,15 @@ namespace GitSharp.Core.Transport
                     throw new CancelledException();
 
                 pckOut.End();
-                resultsPending++;
+                resultsPending++; // Each end will cause a result to come back.
 
                 if (havesSent == 32)
                 {
+                    // On the first block we race ahead and try to send
+                    // more of the second block while waiting for the
+                    // remote to respond to our first block request.
+                    // This keeps us one block ahead of the peer.
+                    //
                     continue;
                 }
 
@@ -308,39 +437,61 @@ namespace GitSharp.Core.Transport
                 {
                     PacketLineIn.AckNackResult anr = pckIn.readACK(ackId);
 
-                    if (anr == PacketLineIn.AckNackResult.NAK)
+                    switch (anr)
                     {
-                        resultsPending--;
-                        break;
+                        case PacketLineIn.AckNackResult.NAK:
+                            // More have lines are necessary to compute the
+                            // pack on the remote side. Keep doing that.
+
+                            resultsPending--;
+                            goto END_READ_RESULT;
+
+                        case PacketLineIn.AckNackResult.ACK:
+                            // The remote side is happy and knows exactly what
+                            // to send us. There is no further negotiation and
+                            // we can break out immediately.
+
+                            _multiAck = MultiAck.OFF;
+                            resultsPending = 0;
+                            receivedAck = true;
+                            goto END_SEND_HAVES;
+
+                        case PacketLineIn.AckNackResult.ACK_CONTINUE:
+                        case PacketLineIn.AckNackResult.ACK_COMMON:
+                        case PacketLineIn.AckNackResult.ACK_READY:
+                            // The server knows this commit (ackId). We don't
+                            // need to send any further along its ancestry, but
+                            // we need to continue to talk about other parts of
+                            // our local history.
+
+                            MarkCommon(_walk.parseAny(ackId));
+                            receivedAck = true;
+                            receivedContinue = true;
+                            havesSinceLastContinue = 0;
+                            break;
                     }
 
-                    if (anr == PacketLineIn.AckNackResult.ACK)
-                    {
-                        _multiAck = false;
-                        resultsPending = 0;
-                        receivedAck = true;
-                        sendHaves = false;
-                        break;
-                    }
-
-                    if (anr == PacketLineIn.AckNackResult.ACK_CONTINUE)
-                    {
-                        MarkCommon(_walk.parseAny(ackId));
-                        receivedAck = true;
-                        receivedContinue = true;
-                        havesSinceLastContinue = 0;
-                    }
 
                     if (monitor.IsCancelled)
                         throw new CancelledException();
                 }
 
+            END_READ_RESULT:
                 if (receivedContinue && havesSinceLastContinue > MAX_HAVES)
                 {
+                    // Our history must be really different from the remote's.
+                    // We just sent a whole slew of have lines, and it did not
+                    // recognize any of them. Avoid sending our entire history
+                    // to them by giving up early.
+                    //
                     break;
                 }
             }
 
+        END_SEND_HAVES:
+
+            // Tell the remote side we have run out of things to talk about.
+            //
             if (monitor.IsCancelled)
                 throw new CancelledException();
             pckOut.WriteString("done\n");
@@ -348,27 +499,51 @@ namespace GitSharp.Core.Transport
 
             if (!receivedAck)
             {
-                _multiAck = false;
+                // Apparently if we have never received an ACK earlier
+                // there is one more result expected from the done we
+                // just sent to the remote.
+                //
+                _multiAck = MultiAck.OFF;
                 resultsPending++;
             }
 
-            while (resultsPending > 0 || _multiAck)
+            while (resultsPending > 0 || _multiAck != MultiAck.OFF)
             {
                 PacketLineIn.AckNackResult anr = pckIn.readACK(ackId);
                 resultsPending--;
 
-                if (anr == PacketLineIn.AckNackResult.ACK)
-                    break;
+                switch (anr)
+                {
+                    case PacketLineIn.AckNackResult.NAK:
+                        // A NAK is a response to an end we queued earlier
+                        // we eat it and look for another ACK/NAK message.
+                        //
+                        break;
 
-                if (anr == PacketLineIn.AckNackResult.ACK_CONTINUE)
-                    _multiAck = true;
+                    case PacketLineIn.AckNackResult.ACK:
+                        // A solitary ACK at this point means the remote won't
+                        // speak anymore, but is going to send us a pack now.
+                        //
+                        goto END_READ_RESULT_2;
+
+                    case PacketLineIn.AckNackResult.ACK_CONTINUE:
+                    case PacketLineIn.AckNackResult.ACK_COMMON:
+                    case PacketLineIn.AckNackResult.ACK_READY:
+                        // We will expect a normal ACK to break out of the loop.
+                        //
+                        _multiAck = MultiAck.CONTINUE;
+                        break;
+                }
 
                 if (monitor.IsCancelled)
                     throw new CancelledException();
             }
+
+        END_READ_RESULT_2:
+            ;
         }
 
-        private class NegotiateBeginRevFilter : RevFilter, IDisposable
+        private class NegotiateBeginRevFilter : RevFilter
         {
             private readonly RevFlag _common;
             private readonly RevFlag _advertised;
@@ -384,22 +559,20 @@ namespace GitSharp.Core.Transport
                 return this;
             }
 
-            public override bool include(GitSharp.Core.RevWalk.RevWalk walker, RevCommit cmit)
+            public override bool include(RevWalk.RevWalk walker, RevCommit cmit)
             {
                 bool remoteKnowsIsCommon = cmit.has(_common);
                 if (cmit.has(_advertised))
                 {
+                    // Remote advertised this, and we have it, hence common.
+                    // Whether or not the remote knows that fact is tested
+                    // before we added the flag. If the remote doesn't know
+                    // we have to still send them this object.
+                    //
                     cmit.add(_common);
                 }
                 return !remoteKnowsIsCommon;
             }
-			
-			public void Dispose ()
-			{
-				_advertised.Dispose();
-				_common.Dispose();
-			}
-			
         }
 
         private void NegotiateBegin()
@@ -428,14 +601,14 @@ namespace GitSharp.Core.Transport
             }
             catch (IOException)
             {
-
+                // We probably just do not have this object locally.
             }
         }
 
         private void MarkCommon(RevObject obj)
         {
             obj.add(COMMON);
-			RevCommit oComm = (obj as RevCommit);
+            var oComm = (obj as RevCommit);
             if (oComm != null)
             {
                 oComm.carry(COMMON);
@@ -444,21 +617,25 @@ namespace GitSharp.Core.Transport
 
         private void ReceivePack(ProgressMonitor monitor)
         {
-            IndexPack ip = IndexPack.Create(local, _sideband ? pckIn.sideband(monitor) : stream);
+			  Stream input = inStream;
+			  if (_sideband)
+				  input = new SideBandInputStream(input, monitor);
+            IndexPack ip = IndexPack.Create(local, input);
             ip.setFixThin(_thinPack);
             ip.setObjectChecking(transport.CheckFetchedObjects);
             ip.index(monitor);
             _packLock = ip.renameAndOpenPack(_lockMessage);
         }
-		
-		public void Dispose ()
-		{
-			_walk.Dispose();
-			REACHABLE.Dispose();
-			COMMON.Dispose();
-			ADVERTISED.Dispose();
-			_reachableCommits.Dispose();
-		}
-		
+
+        public override void Dispose()
+        {
+            _walk.Dispose();
+            REACHABLE.Dispose();
+            COMMON.Dispose();
+            ADVERTISED.Dispose();
+            _reachableCommits.Dispose();
+            base.Dispose();
+        }
+
     }
 }

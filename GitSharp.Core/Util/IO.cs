@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008, Shawn O. Pearce <spearce@spearce.org>
  *
  * All rights reserved.
@@ -46,7 +46,7 @@ namespace GitSharp.Core.Util
     /// <summary>
     /// Input/Output utilities
     /// </summary>
-    public class IO
+    public static class IO
     {
         /// <summary>
         /// Read an entire local file into memory as a byte array.
@@ -123,11 +123,11 @@ namespace GitSharp.Core.Util
         /// <param name="off">position within the buffer to start writing to.</param>
         /// <param name="len">number of bytes that must be read.</param>
         /// <exception cref="EndOfStreamException">
-        /// The <paramref name="stream"/> ended before the requested number of 
+        /// The <paramref name="fd"/> ended before the requested number of 
         /// bytes were read.
         /// </exception>
         /// <exception cref="NotSupportedException">
-        /// The <paramref name="stream"/> does not supports seeking.
+        /// The <paramref name="fd"/> does not supports seeking.
         /// </exception>
         /// <exception cref="IOException">
         /// There was an error reading from the stream.

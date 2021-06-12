@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008, Johannes E. Schindelin <johannes.schindelin@gmx.de>
  * Copyright (C) 2009, Google Inc.
  * Copyright (C) 2009, Gil Ran <gilrun@gmail.com>
@@ -61,8 +61,31 @@ namespace GitSharp.Core.Diff
 		// The file content for this sequence.
 		private readonly byte[] content;
 
+        /// <summary>
+        /// The content of the raw text as byte array.
+        /// </summary>
+        public byte[] Content // <--- [henon] added accessor to be able to reuse the data structure from the api.
+	    {
+	        get
+	        {
+	            return content;
+	        }
+	    }
+
 		// Map of line number to starting position within content.
 		private readonly IntList lines;
+
+        /// <summary>
+        /// Represents starting points of lines in Content. Note: the line indices are 1-based and 
+        /// are mapped to 0-based positions in the Content byte array. As line indices are based on 1 the result of line 0 is undefined.
+        /// </summary>
+	    public IntList LineStartIndices // <--- [henon] added accessor to be able to reuse the data structure from the api.
+	    {
+	        get
+	        {
+	            return lines;
+	        }
+	    }
 
 		// Hash code for each line, for fast equality elimination.
 		private readonly IntList hashes;
@@ -83,6 +106,15 @@ namespace GitSharp.Core.Diff
 			hashes = computeHashes();
 		}
 
+        /// <summary>
+        /// Create a new sequence from a file.
+        /// <para>The entire file contents are used.</para>
+        /// </summary>
+        /// <param name="file">the text file.</param>
+	    public RawText(FileInfo file) : this(IO.ReadFully(file))
+	    {}
+
+
 		public int size()
 		{
 			// The line map is always 2 entries larger than the number of lines in
@@ -92,9 +124,9 @@ namespace GitSharp.Core.Diff
 			return lines.size() - 2;
 		}
 
-		public bool equals(int i, Sequence other, int j)
+		public bool equals(int thisIdx, Sequence other, int otherIdx)
 		{
-			return equals(this, i + 1, (RawText) other, j + 1);
+			return equals(this, thisIdx + 1, (RawText) other, otherIdx + 1);
 		}
 
 		private static bool equals(RawText a, int ai, RawText b, int bi)

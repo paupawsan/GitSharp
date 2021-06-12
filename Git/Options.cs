@@ -79,7 +79,7 @@
 // This allows specifying '-a -b -c' as '-abc', and specifying '-D name=value'
 // as '-Dname=value'.
 //
-// Option processing is disabled by specifying "--".  All options After "--"
+// Option processing is disabled by specifying "--".  All options after "--"
 // are returned by OptionSet.Parse() unchanged and unprocessed.
 //
 // Unprocessed options are returned from OptionSet.Parse().
@@ -134,10 +134,7 @@ using System.Runtime.Serialization;
 using System.Security.Permissions;
 using System.Text;
 using System.Text.RegularExpressions;
-
-#if LINQ
 using System.Linq;
-#endif
 
 #if TEST
 using NDesk.Options;
@@ -145,7 +142,6 @@ using NDesk.Options;
 
 namespace NDesk.Options
 {
-
 	public class OptionValueCollection : IList, IList<string>
 	{
 
@@ -354,7 +350,12 @@ namespace NDesk.Options
 
 		protected static T Parse<T>(string value, OptionContext c)
 		{
-			TypeConverter conv = TypeDescriptor.GetConverter(typeof(T));
+			Type tt = typeof(T);
+			bool nullable = tt.IsValueType && tt.IsGenericType &&
+				!tt.IsGenericTypeDefinition &&
+				tt.GetGenericTypeDefinition() == typeof(Nullable<>);
+			Type targetType = nullable ? tt.GetGenericArguments()[0] : typeof(T);
+			TypeConverter conv = TypeDescriptor.GetConverter(targetType);
 			T t = default(T);
 			try
 			{
@@ -366,7 +367,7 @@ namespace NDesk.Options
 				throw new OptionException(
 						string.Format(
 							c.OptionSet.MessageLocalizer("Could not convert string `{0}' to type {1} for option `{2}'."),
-							value, typeof(T).Name, c.OptionName),
+							value, targetType.Name, c.OptionName),
 						c.OptionName, e);
 			}
 			return t;
@@ -720,60 +721,82 @@ namespace NDesk.Options
 			return new OptionContext(this);
 		}
 
-#if LINQ
+		/// <summary>
+		/// Internal Use Only. Used by NDesk.OptionSetTest for unit testing purposes of OptionSet.Parse. 
+		/// </summary>
 		public List<string> Parse(IEnumerable<string> arguments)
 		{
+			List<string> filePaths = null;
+			List<string> remainingArguments = new List<string>();
+
+			Parse(arguments.ToArray<string>(), out filePaths, out remainingArguments);
+			return remainingArguments;
+		}
+
+		/// <summary>
+		/// Used to parse the options (aka arguments) denoted by a "-" or "--" in the command line and return the remaining arguments in a list.
+		/// </summary>
+		/// <param name="arguments">The command line arguments.</param>
+		/// <param name="remainingArguments">Return value for the arguments remaining after parsing is complete.</param>
+		public void Parse(string[] arguments, out List<string> remainingArguments)
+		{
+			List<string> filePaths = null;
+			Parse(arguments, out filePaths, out remainingArguments);
+		}
+
+		/// <summary>
+		/// Used to parse the options (aka arguments) denoted by a "-" or "--" in the command line.
+		/// This method also returns the multiple file references denoted by -- &amp;filepattern> in git.
+		/// </summary>
+		/// <param name="arguments">The command line arguments.</param>
+		/// <param name="filePaths">Return value for multiple file references, if specified. Setting the value to null will disable this option.</param>
+		/// <param name="remainingArguments">Return value for the arguments remaining after parsing is complete.</param>
+		public void Parse(string[] arguments, out List<string> filePaths, out List<string> remainingArguments)
+		{
+			List<string> args = new List<string>();
+			filePaths = new List<string>();
+
+			foreach (string a in arguments)
+				args.Add(a);
+
 			bool process = true;
 			OptionContext c = CreateOptionContext();
 			c.OptionIndex = -1;
-		    Option def = Contains("<>") ? base["<>"] : null;
+			//var def = GetOptionForName ("<>");
+			//Deviation from NDesk's Options.cs to remove the warning message.
+			Option def = Contains("<>") ? base["<>"] : null;
+
+			int index = args.IndexOf("--");
+			if (index != -1 && args.Count > index)
+			{
+				//Strip the additional filepaths and return as a separate value
+				for (int x = index + 1; x < args.Count; x++)
+					filePaths.Add(args[x]);
+				//filePaths = (List<String>) arguments.Skip(index);
+				args.RemoveRange(index, args.Count - index);
+			}
+
 			var unprocessed =
-				from argument in arguments
-				where ++c.OptionIndex >= 0 && (process || def != null)
-					? process
-						? argument == "--"
-							? (process = false)
-							: !Parse(argument, c)
-								? def != null
-									? Unprocessed(null, def, c, argument)
-									: true
-								: false
-						: def != null
-							? Unprocessed(null, def, c, argument)
-							: true
-					: true
-				select argument;
+					 from argument in args
+					 where ++c.OptionIndex >= 0 && (process || def != null)
+						 ? process
+							 ? argument == "--"
+								 ? (process = false)
+								 : !Parse(argument, c)
+									 ? def != null
+										 ? Unprocessed(null, def, c, argument)
+										 : true
+									 : false
+							 : def != null
+								 ? Unprocessed(null, def, c, argument)
+								 : true
+						 : true
+					 select argument;
 			List<string> r = unprocessed.ToList();
 			if (c.Option != null)
 				c.Option.Invoke(c);
-			return r;
+			remainingArguments = r;
 		}
-#else
-		public List<string> Parse (IEnumerable<string> arguments)
-		{
-			OptionContext c = CreateOptionContext ();
-			c.OptionIndex = -1;
-			bool process = true;
-			List<string> unprocessed = new List<string> ();
-			Option def = Contains ("<>") ? this ["<>"] : null;
-			foreach (string argument in arguments) {
-				++c.OptionIndex;
-				if (argument == "--") {
-					process = false;
-					continue;
-				}
-				if (!process) {
-					Unprocessed (unprocessed, def, c, argument);
-					continue;
-				}
-				if (!Parse (argument, c))
-					Unprocessed (unprocessed, def, c, argument);
-			}
-			if (c.Option != null)
-				c.Option.Invoke (c);
-			return unprocessed;
-		}
-#endif
 
 		private static bool Unprocessed(ICollection<string> extra, Option def, OptionContext c, string argument)
 		{
@@ -956,13 +979,14 @@ namespace NDesk.Options
 					o.Write(new string(' ', OptionWidth));
 				}
 
-				List<string> lines = GetLines(localizer(GetDescription(p.Description)));
-				o.WriteLine(lines[0]);
+				bool indent = false;
 				string prefix = new string(' ', OptionWidth + 2);
-				for (int i = 1; i < lines.Count; ++i)
+				foreach (string line in GetLines(localizer(GetDescription(p.Description))))
 				{
-					o.Write(prefix);
-					o.WriteLine(lines[i]);
+					if (indent)
+						o.Write(prefix);
+					o.WriteLine(line);
+					indent = true;
 				}
 			}
 		}
@@ -1062,7 +1086,7 @@ namespace NDesk.Options
 		{
 			if (description == null)
 				return string.Empty;
-			var sb = new StringBuilder(description.Length);
+			StringBuilder sb = new StringBuilder(description.Length);
 			int start = -1;
 			for (int i = 0; i < description.Length; ++i)
 			{
@@ -1077,15 +1101,11 @@ namespace NDesk.Options
 						else if (start < 0)
 							start = i + 1;
 						break;
-
 					case '}':
 						if (start < 0)
 						{
 							if ((i + 1) == description.Length || description[i + 1] != '}')
-							{
 								throw new InvalidOperationException("Invalid option description: " + description);
-							}
-
 							++i;
 							sb.Append("}");
 						}
@@ -1095,89 +1115,61 @@ namespace NDesk.Options
 							start = -1;
 						}
 						break;
-
 					case ':':
 						if (start < 0)
-						{
-							sb.Append(description[i]);
-						}
-						else
-						{
-							start = i + 1;
-						}
+							goto default;
+						start = i + 1;
 						break;
-
 					default:
 						if (start < 0)
-						{
 							sb.Append(description[i]);
-						}
 						break;
 				}
 			}
-
 			return sb.ToString();
 		}
 
-		private static List<string> GetLines(string description)
+		private static IEnumerable<string> GetLines(string description)
 		{
-			var lines = new List<string>();
 			if (string.IsNullOrEmpty(description))
 			{
-				lines.Add(string.Empty);
-				return lines;
+				yield return string.Empty;
+				yield break;
 			}
-			int length = 80 - OptionWidth - 2;
+			int length = 80 - OptionWidth - 1;
 			int start = 0, end;
 			do
 			{
 				end = GetLineEnd(start, length, description);
-				bool cont = false;
-				if (end < description.Length)
-				{
-					char c = description[end];
-					if (c == '-' || (char.IsWhiteSpace(c) && c != '\n'))
-					{
-						++end;
-					}
-					else if (c != '\n')
-					{
-						cont = true;
-						--end;
-					}
-				}
-				lines.Add(description.Substring(start, end - start));
-				if (cont)
-				{
-					lines[lines.Count - 1] += "-";
-				}
+				char c = description[end - 1];
+				if (char.IsWhiteSpace(c))
+					--end;
+				bool writeContinuation = end != description.Length && !IsEolChar(c);
+				string line = description.Substring(start, end - start) +
+						(writeContinuation ? "-" : "");
+				yield return line;
 				start = end;
-				if (start < description.Length && description[start] == '\n')
+				if (char.IsWhiteSpace(c))
 					++start;
+				length = 80 - OptionWidth - 2 - 1;
 			} while (end < description.Length);
-			return lines;
+		}
+
+		private static bool IsEolChar(char c)
+		{
+			return !char.IsLetterOrDigit(c);
 		}
 
 		private static int GetLineEnd(int start, int length, string description)
 		{
-			int end = Math.Min(start + length, description.Length);
+			int end = System.Math.Min(start + length, description.Length);
 			int sep = -1;
-			for (int i = start; i < end; ++i)
+			for (int i = start + 1; i < end; ++i)
 			{
-				switch (description[i])
-				{
-					case ' ':
-					case '\t':
-					case '\v':
-					case '-':
-					case ',':
-					case '.':
-					case ';':
-						sep = i;
-						break;
-					case '\n':
-						return i;
-				}
+				if (description[i] == '\n')
+					return i + 1;
+				if (IsEolChar(description[i]))
+					sep = i + 1;
 			}
 			if (sep == -1 || end == description.Length)
 				return end;
